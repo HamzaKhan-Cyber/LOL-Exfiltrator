@@ -1,0 +1,1 @@
+"""Core package — obfuscation engine and display utilities."""

