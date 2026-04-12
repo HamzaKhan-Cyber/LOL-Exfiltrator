@@ -1,11 +1,9 @@
-# Display / output formatter using colorama.
 
 import sys
 import io
 import signal
 import textwrap
 
-# ── Force stdout to UTF-8 on Windows ──────────────────────────
 if sys.stdout.encoding and sys.stdout.encoding.lower() not in ('utf-8', 'utf8'):
     sys.stdout = io.TextIOWrapper(
         sys.stdout.buffer, encoding='utf-8', errors='replace',
@@ -15,12 +13,9 @@ from colorama import Fore, Back, Style, init as colorama_init
 
 colorama_init(autoreset=True)
 
-# ── Gracefully handle broken pipes (e.g. piped to head/less) ──
-# BrokenPipeError would otherwise cause an ugly traceback.
 signal.signal(signal.SIGPIPE, signal.SIG_DFL) if hasattr(signal, 'SIGPIPE') else None
 
 
-# ── Banner ─────────────────────────────────────────────────────
 
 BANNER = (
     "\n"
@@ -42,18 +37,15 @@ BANNER = (
 )
 
 
-# ── Safe print wrapper ────────────────────────────────────────
 
 def _safe_print(*args, **kwargs) -> None:
     """Print wrapper that silently handles BrokenPipeError."""
     try:
         print(*args, **kwargs)
     except BrokenPipeError:
-        # Output consumer closed the pipe — nothing to do.
         sys.exit(0)
 
 
-# ── Public display functions ───────────────────────────────────
 
 def print_banner() -> None:
     _safe_print(BANNER)
@@ -114,8 +106,7 @@ def _print_wrapped(
     length so that wrapped lines always align under the first word
     of the text body.
     """
-    # "    ◈ {label}: " — compute visible width for indent
-    visible_prefix_len = 4 + 2 + len(label) + 2      # spaces + bullet + label + colon+space
+    visible_prefix_len = 4 + 2 + len(label) + 2      
     indent = ' ' * visible_prefix_len
 
     wrapped = textwrap.fill(
@@ -127,7 +118,6 @@ def _print_wrapped(
     _safe_print(f"{prefix}{colour}{wrapped}{Style.RESET_ALL}")
 
 
-# ── Interactive prompts ────────────────────────────────────────
 
 def prompt(message: str, default: str = '') -> str:
     """Prompt user for free-text input. Ctrl-C / Ctrl-D exits cleanly."""
@@ -175,7 +165,6 @@ def prompt_choice(message: str, choices: list) -> str:
         )
 
 
-# ── Status helpers ─────────────────────────────────────────────
 
 def print_info(msg: str) -> None:
     _safe_print(f"  {Fore.BLUE}{Style.BRIGHT}[i]{Style.RESET_ALL} {msg}")

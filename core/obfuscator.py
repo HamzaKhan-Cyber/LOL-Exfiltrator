@@ -1,4 +1,3 @@
-# Obfuscation engine — strategy functions and dispatcher.
 
 import random
 import string
@@ -6,9 +5,6 @@ import base64
 import shlex
 
 
-# ══════════════════════════════════════════════════════════════
-# Helper utilities
-# ══════════════════════════════════════════════════════════════
 
 def _insert_quotes(word: str, quote_char: str = '"') -> str:
     """Insert empty-string quotes at random positions in a word."""
@@ -120,7 +116,6 @@ def _split_string_powershell(command: str) -> str:
     binary = tokens[0]
     rest   = tokens[1]
 
-    # Ensure split position works even for very short binaries (e.g. "reg")
     max_pos = max(2, len(binary) - 2)
     min_pos = min(2, max_pos)
     mid = random.randint(min_pos, max_pos) if min_pos < max_pos else min_pos
@@ -168,7 +163,7 @@ def _hex_ip(command: str, ip: str) -> str:
     try:
         parts = [int(o) for o in ip.split('.')]
         if len(parts) != 4 or not all(0 <= p <= 255 for p in parts):
-            return command      # not a valid IPv4 — skip
+            return command      
         hex_ip = '0x' + ''.join(f'{p:02X}' for p in parts)
         return command.replace(ip, hex_ip)
     except (ValueError, AttributeError):
@@ -196,10 +191,9 @@ def _unicode_escape(command: str) -> str:
     is handled correctly — only standalone occurrences are encoded.
     """
     result = command
-    # Replace only exact keyword matches, not substrings
     replacements = [
-        ('https', 'h%74tps'),   # try https first (longer match)
-        ('http',  'h%74tp'),    # then http
+        ('https', 'h%74tps'),   
+        ('http',  'h%74tp'),    
         ('curl',  'cu%72l'),
         ('wget',  'w%67et'),
     ]
@@ -207,7 +201,7 @@ def _unicode_escape(command: str) -> str:
         if target in result:
             result = result.replace(target, encoded, 1)
             if target == 'https':
-                break           # already handled the URL scheme
+                break           
     return result
 
 
@@ -226,17 +220,12 @@ def _reverse_string_bash(command: str) -> str:
     and special characters inside the command don't break the shell.
     """
     reversed_cmd = command[::-1]
-    # Escape backslashes and single-quotes for $'...' quoting
     safe = reversed_cmd.replace('\\', '\\\\').replace("'", "\\'")
     return f"echo $'{safe}' | rev | bash"
 
 
-# ══════════════════════════════════════════════════════════════
-# Technique registry
-# ══════════════════════════════════════════════════════════════
 
 TECHNIQUE_INFO = {
-    # ── Windows techniques ────────────────────────────────────
     'env_var': {
         'os': 'windows',
         'label': '%SystemRoot% env-var expansion + quote insertion + hex IP',
@@ -297,7 +286,6 @@ TECHNIQUE_INFO = {
             "breaks string signatures while PowerShell strips them at parse time."
         ),
     },
-    # ── Linux techniques ──────────────────────────────────────
     'env_concat': {
         'os': 'linux',
         'label': 'Shell variable name concatenation',
@@ -370,20 +358,13 @@ TECHNIQUE_INFO = {
 }
 
 
-# ══════════════════════════════════════════════════════════════
-# Deterministic auto-selection strategy
-# ══════════════════════════════════════════════════════════════
 
-# Priority order for auto mode — first matching rule wins.
-# This replaces the old random.random() coin flip, making
-# auto mode predictable and testable.
 
 _WINDOWS_AUTO_PRIORITY = [
-    # (condition_fn, technique_key, transform_fn)
     (lambda b, _ip: 'powershell' in b.lower(),
      'ps_iex',  lambda cmd, ip: _split_string_powershell(cmd)),
     (lambda _b, ip: bool(ip),
-     'env_var',  None),   # None → uses the composite env_var pipeline below
+     'env_var',  None),   
     (lambda _b, _ip: True,
      'quote',   None),
 ]
@@ -394,9 +375,6 @@ _LINUX_AUTO_PRIORITY = [
 ]
 
 
-# ══════════════════════════════════════════════════════════════
-# Public API
-# ══════════════════════════════════════════════════════════════
 
 def get_available_techniques(os_type: str = 'all') -> dict:
     """Return available technique names and descriptions for a given OS."""
@@ -417,7 +395,6 @@ def obfuscate(command: str, os_type: str, binary: str,
     """
     os_type = os_type.lower()
 
-    # ── Windows obfuscation paths ─────────────────────────────
     if os_type == 'windows':
 
         if technique == 'ps_b64':
@@ -445,7 +422,6 @@ def obfuscate(command: str, os_type: str, binary: str,
             explain = TECHNIQUE_INFO['ps_iex']['explain']
 
         elif technique == 'env_var' or technique == 'auto':
-            # Deterministic auto: always use env_var composite for Windows
             obf = _env_var_substitute_windows(command)
             first_space = obf.find(' ')
             if first_space > 0:
@@ -456,13 +432,11 @@ def obfuscate(command: str, os_type: str, binary: str,
             explain = TECHNIQUE_INFO['env_var']['explain']
 
         else:
-            # Explicit 'quote' technique
             first_token = command.split()[0]
             obf = _insert_quotes(first_token, '"') + command[len(first_token):]
             tech    = TECHNIQUE_INFO['quote']['label']
             explain = TECHNIQUE_INFO['quote']['explain']
 
-    # ── Linux obfuscation paths ───────────────────────────────
     else:
         if technique == 'b64_bash':
             obf     = _base64_bash(command)
@@ -491,8 +465,6 @@ def obfuscate(command: str, os_type: str, binary: str,
                 explain = TECHNIQUE_INFO['env_concat']['explain']
 
         elif technique == 'env_concat':
-            # FIX: env_concat now correctly calls only _env_concat_linux
-            # (not the combo function). Use 'env_concat_hex' for the combo.
             obf     = _env_concat_linux(command)
             tech    = TECHNIQUE_INFO['env_concat']['label']
             explain = TECHNIQUE_INFO['env_concat']['explain']
@@ -508,7 +480,6 @@ def obfuscate(command: str, os_type: str, binary: str,
             explain = TECHNIQUE_INFO['hex_ip']['explain']
 
         else:
-            # ── Deterministic auto mode for Linux ─────────────
             bin_lower = binary.lower()
 
             candidate = _unicode_escape(command)

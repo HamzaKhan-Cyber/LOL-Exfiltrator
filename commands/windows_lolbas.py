@@ -1,10 +1,8 @@
-# Windows LOLBAS command dictionary — validated via TechniqueEntry.
 
 from commands import TechniqueEntry
 
 WINDOWS_COMMANDS = {
 
-    # ── DOWNLOAD ───────────────────────────────────────────────
     "download": [
         TechniqueEntry(
             name="certutil (Base64 download)",
@@ -80,7 +78,6 @@ WINDOWS_COMMANDS = {
         ),
     ],
 
-    # ── UPLOAD / DATA EXFILTRATION ─────────────────────────────
     "upload": [
         TechniqueEntry(
             name="PowerShell HTTP POST exfil",
@@ -155,7 +152,6 @@ WINDOWS_COMMANDS = {
         ),
     ],
 
-    # ── PERSISTENCE ────────────────────────────────────────────
     "persistence": [
         TechniqueEntry(
             name="reg add (Run key)",

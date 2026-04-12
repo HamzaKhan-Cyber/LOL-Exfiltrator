@@ -16,14 +16,12 @@ from core.display             import (
 )
 
 
-# ── Constants ──────────────────────────────────────────────────
 
 SUPPORTED_OS      = ['windows', 'linux']
 SUPPORTED_ACTIONS = ['download', 'upload', 'persistence']
 DEFAULT_PORT      = '8080'
 
 
-# ── Core helpers ───────────────────────────────────────────────
 
 def get_commands(os_type: str, action: str) -> list:
     """Return the command list for the given OS and action."""
@@ -64,7 +62,6 @@ def validate_port(port: str) -> str:
     return port
 
 
-# ── Interactive wizard ─────────────────────────────────────────
 
 def run_interactive(args: argparse.Namespace) -> None:
     """
@@ -73,7 +70,6 @@ def run_interactive(args: argparse.Namespace) -> None:
     """
     print_banner()
 
-    # ── Step 1: OS selection ──────────────────────────────────
     if args.os:
         os_type = args.os.lower()
         if os_type not in SUPPORTED_OS:
@@ -84,7 +80,6 @@ def run_interactive(args: argparse.Namespace) -> None:
         print_section("Step 1 › Select Target OS")
         os_type = prompt_choice("Target OS", [o.capitalize() for o in SUPPORTED_OS]).lower()
 
-    # ── Step 2: Action selection ──────────────────────────────
     if args.action:
         action = args.action.lower()
         if action not in SUPPORTED_ACTIONS:
@@ -95,7 +90,6 @@ def run_interactive(args: argparse.Namespace) -> None:
         print_section("Step 2 › Select Action")
         action = prompt_choice("Desired Action", [a.capitalize() for a in SUPPORTED_ACTIONS]).lower()
 
-    # ── Step 3: Target details ────────────────────────────────
     if action in ('download', 'upload'):
         attacker_ip   = args.ip   or prompt("Attacker IP", "192.168.1.100")
         attacker_port = validate_port(args.port or prompt("Attacker Port", DEFAULT_PORT))
@@ -105,13 +99,11 @@ def run_interactive(args: argparse.Namespace) -> None:
         attacker_port = validate_port(args.port or prompt("Callback Port", DEFAULT_PORT))
         filename      = args.filename or prompt("Payload Filename (served over HTTP)", "shell.ps1")
 
-    # ── Fetch commands ────────────────────────────────────────
     commands = get_commands(os_type, action)
     if not commands:
         print_error(f"No commands found for OS='{os_type}' action='{action}'.")
         sys.exit(1)
 
-    # ── Binary filter ─────────────────────────────────────────
     if args.binary:
         filtered = [c for c in commands if args.binary.lower() in c.binary.lower()]
         if not filtered:
@@ -122,7 +114,6 @@ def run_interactive(args: argparse.Namespace) -> None:
             sys.exit(1)
         commands = filtered
 
-    # ── Display results ───────────────────────────────────────
     print_section(
         f"Results  ›  OS: {os_type.capitalize()}  |  Action: {action.capitalize()}  "
         f"|  Target: {attacker_ip}:{attacker_port}/{filename}"
@@ -164,10 +155,8 @@ def run_interactive(args: argparse.Namespace) -> None:
     print_warning("Reminder: Use only on systems you are authorised to test.")
 
 
-# ── Argument parser ────────────────────────────────────────────
 
 def build_parser() -> argparse.ArgumentParser:
-    # Dynamically gather all valid technique names from the obfuscator
     all_techniques = sorted(get_available_techniques('all').keys())
     technique_choices = ['auto'] + all_techniques
 
@@ -255,7 +244,6 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-# ── List mode ──────────────────────────────────────────────────
 
 def run_list_mode(args: argparse.Namespace) -> None:
     """Print a catalogue of available techniques without generating commands."""
@@ -284,7 +272,6 @@ def run_list_mode(args: argparse.Namespace) -> None:
     print()
 
 
-# ── Entry point ────────────────────────────────────────────────
 
 def main() -> None:
     parser = build_parser()

@@ -1,10 +1,8 @@
-# Linux GTFOBins command dictionary — validated via TechniqueEntry.
 
 from commands import TechniqueEntry
 
 LINUX_COMMANDS = {
 
-    # ── DOWNLOAD ───────────────────────────────────────────────
     "download": [
         TechniqueEntry(
             name="curl (silent download)",
@@ -97,7 +95,6 @@ LINUX_COMMANDS = {
         ),
     ],
 
-    # ── UPLOAD / DATA EXFILTRATION ─────────────────────────────
     "upload": [
         TechniqueEntry(
             name="curl HTTP POST exfil",
@@ -201,7 +198,6 @@ LINUX_COMMANDS = {
         ),
     ],
 
-    # ── PERSISTENCE ────────────────────────────────────────────
     "persistence": [
         TechniqueEntry(
             name="crontab persistence",

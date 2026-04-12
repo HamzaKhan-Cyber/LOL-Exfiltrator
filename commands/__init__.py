@@ -16,11 +16,10 @@ class TechniqueEntry:
     binary: str
     template: str
     stealth_note: str
-    requires: str = ""                       # optional — empty string default
-    privilege: str = "user"                   # 'user' | 'admin' | 'system'
-    detection_risk: str = "medium"            # 'low' | 'medium' | 'high'
+    requires: str = ""                       
+    privilege: str = "user"                   
+    detection_risk: str = "medium"            
 
-    # ── validation ──────────────────────────────────────────────
     def __post_init__(self) -> None:
         required_placeholders = {"{ip}", "{port}", "{filename}"}
         present = {p for p in required_placeholders if p in self.template}
