@@ -91,14 +91,26 @@ def validate_filename(filename: str) -> bool:
     return not bool(re.search(invalid_chars, filename))
 
 def get_valid_ip(arg_val: str, prompt_msg: str, default: str) -> str:
-    val = arg_val or prompt(prompt_msg, default)
+    if arg_val:
+        if not validate_ip(arg_val):
+            print_error(f"Invalid IP address or domain: '{arg_val}'")
+            sys.exit(1)
+        return arg_val
+
+    val = prompt(prompt_msg, default)
     while not validate_ip(val):
-        print_warning(f"Invalid IP address: '{val}'. Please enter a valid IPv4/IPv6 address.")
+        print_warning(f"Invalid IP address: '{val}'. Please enter a valid IPv4/IPv6 address or domain.")
         val = prompt(prompt_msg, default)
     return val
 
 def get_valid_filename(arg_val: str, prompt_msg: str, default: str) -> str:
-    val = arg_val or prompt(prompt_msg, default)
+    if arg_val:
+        if not validate_filename(arg_val):
+            print_error(f"Invalid filename: '{arg_val}'. Cannot contain special characters.")
+            sys.exit(1)
+        return arg_val
+
+    val = prompt(prompt_msg, default)
     while not validate_filename(val):
         print_warning(f"Invalid filename: '{val}'. Cannot contain special characters.")
         val = prompt(prompt_msg, default)

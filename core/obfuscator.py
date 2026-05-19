@@ -86,7 +86,7 @@ def _env_var_substitute_windows(command: str) -> str:
     for binary, expanded in substitutions.items():
         pattern = rf'\b{re.escape(binary)}\b'
         if re.search(pattern, command, re.IGNORECASE):
-            return re.sub(pattern, expanded, command, count=1, flags=re.IGNORECASE)
+            return re.sub(pattern, lambda m: expanded, command, count=1, flags=re.IGNORECASE)
     return command
 
 

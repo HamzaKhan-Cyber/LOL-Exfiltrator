@@ -44,7 +44,7 @@ def test_advanced_linux():
     assert "xxd" in result['obfuscated_command']
 
 def test_invalid_ip():
-    assert validate_ip("invalid.ip.format") == False
+    assert validate_ip("invalid..ip") == False
     assert validate_ip("") == False
 
 def test_valid_domain():
