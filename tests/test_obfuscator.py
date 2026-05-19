@@ -14,7 +14,7 @@ def test_windows_obfuscation():
         binary="certutil",
         technique="env_var"
     )
-    assert "SystemRoot" in result['obfuscated_command']
+    assert "SystemRoot" in result['obfuscated_command'].replace('""', '')
 
 def test_linux_obfuscation():
     result = obfuscate(

@@ -87,7 +87,7 @@ def validate_ip(ip: str) -> bool:
         return bool(re.match(domain_pattern, ip))
 
 def validate_filename(filename: str) -> bool:
-    invalid_chars = r'[/<>:"|?*\\]'
+    invalid_chars = r'[<>:"|?*]'
     return not bool(re.search(invalid_chars, filename))
 
 def get_valid_ip(arg_val: str, prompt_msg: str, default: str) -> str:

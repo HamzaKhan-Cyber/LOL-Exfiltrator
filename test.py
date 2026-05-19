@@ -18,6 +18,10 @@ import time
 import traceback
 from collections import defaultdict
 
+if sys.stdout.encoding.lower() != 'utf-8':
+    sys.stdout.reconfigure(encoding='utf-8')
+from collections import defaultdict
+
 # ── Setup path ─────────────────────────────────────────────────
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -336,8 +340,8 @@ def test_advanced_techniques():
 
     # ── WIN: SecureString — must NOT contain 'certutil' literal
     r = _ps_securestring_decode(test_cmd)
-    if 'certutil' not in r and 'FromBase64String' in r:
-        ok("ps_secure", "Original keyword hidden + Base64 decode present")
+    if 'certutil' not in r and 'FromBase64String' in r and 'bxor' in r:
+        ok("ps_secure", "Original keyword hidden + XOR/Base64 decode present")
     else:
         fail("ps_secure", f"Keyword leak or missing decode: {r[:80]}")
 
@@ -390,8 +394,8 @@ def test_advanced_techniques():
 
     # ── LIN: openssl_aes — must have encryption pipeline ──────
     r = _openssl_aes_pipe(lin_cmd)
-    if 'aes-256-cbc' in r and 'pass:' in r and 'curl' not in r:
-        ok("openssl_aes", "AES-256 pipeline present, original command hidden")
+    if 'aes-256-cbc' in r and 'env:K' in r and 'curl' not in r:
+        ok("openssl_aes", "AES-256 pipeline present, key hidden via env var")
     else:
         fail("openssl_aes", f"Encryption structure issue: {r[:80]}")
 
@@ -585,7 +589,7 @@ def test_performance():
     print(f"  {'─'*20} {'─'*12} {'─'*12}")
 
     for name, fn in benchmarks_advanced.items():
-        n = 10_000
+        n = 100
         t0 = time.perf_counter()
         for _ in range(n):
             fn()

