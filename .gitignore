@@ -8,3 +8,6 @@ venv/
 dist/
 build/
 README_Notes.md
+desktop.ini
+.pytest_cache/
+*.log
