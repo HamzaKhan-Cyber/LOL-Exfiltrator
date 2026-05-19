@@ -289,10 +289,8 @@ def test_edge_cases():
     # ── https vs http in unicode_escape ───────────────────────
     cmd_https = "curl -s https://10.0.0.1/file"
     result = _unicode_escape(cmd_https)
-    if "h%74tps" in result and "h%74tp" not in result.replace("h%74tps", ""):
-        ok("unicode_escape(https)", "Correctly handles https without double-encoding")
-    elif "h%74tps" in result:
-        ok("unicode_escape(https)", f"https encoded correctly: {result}")
+    if "https://" in result and ("%65" in result or "%69" in result):
+        ok("unicode_escape(https)", "Preserves protocol prefix but encodes path")
     else:
         fail("unicode_escape(https)", f"Unexpected: {result}")
 
