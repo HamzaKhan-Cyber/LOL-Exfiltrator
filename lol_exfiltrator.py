@@ -3,6 +3,16 @@
 
 import argparse
 import sys
+import logging
+import ipaddress
+import re
+
+logging.basicConfig(
+    filename='lol_exfiltrator.log',
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s'
+)
+
 
 from commands.windows_lolbas  import WINDOWS_COMMANDS
 from commands.linux_gtfobins  import LINUX_COMMANDS
@@ -61,6 +71,31 @@ def validate_port(port: str) -> str:
         return DEFAULT_PORT
     return port
 
+def validate_ip(ip: str) -> bool:
+    try:
+        ipaddress.ip_address(ip)
+        return True
+    except ValueError:
+        return False
+
+def validate_filename(filename: str) -> bool:
+    invalid_chars = r'[/<>:"|?*\\]'
+    return not bool(re.search(invalid_chars, filename))
+
+def get_valid_ip(arg_val: str, prompt_msg: str, default: str) -> str:
+    val = arg_val or prompt(prompt_msg, default)
+    while not validate_ip(val):
+        print_warning(f"Invalid IP address: '{val}'. Please enter a valid IPv4/IPv6 address.")
+        val = prompt(prompt_msg, default)
+    return val
+
+def get_valid_filename(arg_val: str, prompt_msg: str, default: str) -> str:
+    val = arg_val or prompt(prompt_msg, default)
+    while not validate_filename(val):
+        print_warning(f"Invalid filename: '{val}'. Cannot contain special characters.")
+        val = prompt(prompt_msg, default)
+    return val
+
 
 
 def run_interactive(args: argparse.Namespace) -> None:
@@ -91,13 +126,13 @@ def run_interactive(args: argparse.Namespace) -> None:
         action = prompt_choice("Desired Action", [a.capitalize() for a in SUPPORTED_ACTIONS]).lower()
 
     if action in ('download', 'upload'):
-        attacker_ip   = args.ip   or prompt("Attacker IP", "192.168.1.100")
+        attacker_ip   = get_valid_ip(args.ip, "Attacker IP", "192.168.1.100")
         attacker_port = validate_port(args.port or prompt("Attacker Port", DEFAULT_PORT))
-        filename      = args.filename or prompt("Remote Filename", "payload.exe")
+        filename      = get_valid_filename(args.filename, "Remote Filename", "payload.exe")
     else:
-        attacker_ip   = args.ip   or prompt("Callback IP (for payload URL)", "192.168.1.100")
+        attacker_ip   = get_valid_ip(args.ip, "Callback IP (for payload URL)", "192.168.1.100")
         attacker_port = validate_port(args.port or prompt("Callback Port", DEFAULT_PORT))
-        filename      = args.filename or prompt("Payload Filename (served over HTTP)", "shell.ps1")
+        filename      = get_valid_filename(args.filename, "Payload Filename (served over HTTP)", "shell.ps1")
 
     commands = get_commands(os_type, action)
     if not commands:
@@ -145,6 +180,8 @@ def run_interactive(args: argparse.Namespace) -> None:
         print_technique(obf_result['technique_used'])
         print_obf_explanation(obf_result['explanation'])
 
+        logging.info(f"Generated command for {os_type} - {action} - {cmd_entry.binary} - Obf: {obf_result['technique_used']}")
+
         if cmd_entry.requires:
             print()
             print_requires(cmd_entry.requires)
@@ -181,14 +218,15 @@ def build_parser() -> argparse.ArgumentParser:
     target = parser.add_argument_group('Target')
     target.add_argument(
         '--os', '-O',
-        choices=['windows', 'linux', 'Windows', 'Linux'],
+        choices=['windows', 'linux'],
+        type=str.lower,
         metavar='OS',
         help='Target operating system: windows | linux',
     )
     target.add_argument(
         '--action', '-a',
-        choices=['download', 'upload', 'persistence',
-                 'Download', 'Upload', 'Persistence'],
+        choices=['download', 'upload', 'persistence'],
+        type=str.lower,
         metavar='ACTION',
         help='Technique category: download | upload | persistence',
     )

