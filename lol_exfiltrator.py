@@ -3,12 +3,17 @@
 
 import argparse
 import sys
+import os
 import logging
 import ipaddress
 import re
 
+log_dir = os.path.expanduser("~/.lol-exfiltrator/")
+os.makedirs(log_dir, exist_ok=True)
+log_file = os.path.join(log_dir, "lol_exfiltrator.log")
+
 logging.basicConfig(
-    filename='lol_exfiltrator.log',
+    filename=log_file,
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s'
 )
@@ -72,11 +77,14 @@ def validate_port(port: str) -> str:
     return port
 
 def validate_ip(ip: str) -> bool:
+    if not ip:
+        return False
     try:
         ipaddress.ip_address(ip)
         return True
     except ValueError:
-        return False
+        domain_pattern = r'^([a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?\.)+[a-zA-Z]{2,}$|^localhost$'
+        return bool(re.match(domain_pattern, ip))
 
 def validate_filename(filename: str) -> bool:
     invalid_chars = r'[/<>:"|?*\\]'

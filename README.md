@@ -26,7 +26,7 @@ A Python CLI tool that generates clear and obfuscated commands using Windows (LO
 ## Setup
 
 ```bash
-pip install colorama
+pip install -r requirements.txt
 ```
 
 ## Detailed Usage Guide
