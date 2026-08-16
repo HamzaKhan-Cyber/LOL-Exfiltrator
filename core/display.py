@@ -29,7 +29,7 @@ BANNER = (
     ╚══════╝ ╚═════╝ ╚══════╝      ╚══════╝╚═╝  ╚═╝╚═╝     ╚═╝╚══════╝
 """
     + Fore.YELLOW + Style.NORMAL
-    + "    LOL-Exfiltrator v1.1  │  LOLBAS & GTFOBins Red Team Reference"
+    + "    LOL-Exfiltrator v2.0  │  LOLBAS & GTFOBins Red Team Reference"
     + "\n    For authorised penetration testing and CTF use only.\n"
     + Fore.WHITE + Style.DIM
     + "    ─────────────────────────────────────────────────────────────\n"
