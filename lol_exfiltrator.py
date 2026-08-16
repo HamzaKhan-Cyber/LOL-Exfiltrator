@@ -28,6 +28,7 @@ from core.display             import (
     print_technique, print_stealth_note, print_obf_explanation,
     print_requires, print_divider, print_info, print_warning,
     print_error, print_success, prompt, prompt_choice,
+    print_privilege, print_detection_risk,
 )
 
 
@@ -205,6 +206,9 @@ def run_interactive(args: argparse.Namespace) -> None:
         if cmd_entry.requires:
             print()
             print_requires(cmd_entry.requires)
+
+        print_privilege(cmd_entry.privilege)
+        print_detection_risk(cmd_entry.detection_risk)
 
         print()
 
